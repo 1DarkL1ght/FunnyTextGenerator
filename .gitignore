@@ -1,0 +1,10 @@
+.env
+session_name.session
+/outputs
+/data
+.env
+*/__pycache__
+tokenize
+*.ipynb
+*.pth
+*.pt

@@ -1,0 +1,7 @@
+torcheval
+numpy
+pandas
+tokenizers
+transformers
+matplotlib
+tqdm
