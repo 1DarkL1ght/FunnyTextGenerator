@@ -1,18 +1,20 @@
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.pre_tokenizers import ByteLevel
+from tokenizers import decoders
 from tokenizers.processors import TemplateProcessing
 import pandas as pd
 
 class CustomTokenizer:
     def __init__(self, vocab_size: int = 10000):
         self.tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-        self.tokenizer.pre_tokenizer = Whitespace()  # Предварительное разбиение по пробелам
+        self.tokenizer.pre_tokenizer = ByteLevel()  # Предварительное разбиение по пробелам
+        self.tokenizer.decoder = decoders.ByteLevel()
         self.trainer = BpeTrainer(
             vocab_size=vocab_size,  # Размер словаря
             min_frequency=2,  # Игнорировать пары, встречающиеся реже 2 раз
-            special_tokens=["[PAD]", "[EOS]"]
+            special_tokens=["[PAD]", "[EOS]", "[UNK]"]
         )
         self.eos_id = None
         self.pad_id = None
@@ -26,7 +28,7 @@ class CustomTokenizer:
         self.unk_id = self.tokenizer.token_to_id("[UNK]")
         self.tokenizer.post_processor = TemplateProcessing(
             single="$A [EOS]",
-            special_tokens=[("[EOS]", self.eos_id)]
+            special_tokens=[("[EOS]", self.eos_id), ("[UNK]", self.unk_id), ("[PAD]", self.pad_id)]
         )
 
     def train(self, df):
@@ -36,15 +38,17 @@ class CustomTokenizer:
         self.unk_id = self.tokenizer.token_to_id("[UNK]")
         self.tokenizer.post_processor = TemplateProcessing(
             single="$A [EOS]",
-            special_tokens=[("[EOS]", self.eos_id)]
+            special_tokens=[("[EOS]", self.eos_id), ("[UNK]", self.unk_id), ("[PAD]", self.pad_id)]
         )
 
-    def save(self):
-        self.tokenizer.save('outputs/tokenizer.json')
+    def save(self, path: str):
+        self.tokenizer.save(path)
 
     def encode(self, text):
         return self.tokenizer.encode(text)
 
-    def decode(self, tokens):
-        return self.tokenizer.decode(tokens)
+    def decode(self, tokens) -> str:
+        raw_str = self.tokenizer.decode(tokens)
+        # raw_str = raw_str[raw_str.find("Ġ") + 1:].replace(" ", "").replace("Ġ", " ")
+        return raw_str
 
