@@ -7,6 +7,7 @@ class ModelConfig:
                  d_model: int=512,
                  latent_dim: int=256,
                  dim_feedforward: int=2048,
+                 reduction: str="sum",
                  nhead: int=8,
                  num_layers: int=6,
                  dropout: float=0.1,
@@ -18,6 +19,7 @@ class ModelConfig:
         self.d_model = d_model
         self.latent_dim = latent_dim
         self.dim_feedforward = dim_feedforward
+        self.reduction = reduction
         self.nhead = nhead
         self.num_layers = num_layers
         self.dropout = dropout
@@ -43,12 +45,18 @@ class TrainingConfig:
                  train_tokenizer: bool=True,
                  warmup_steps: int=1,
                  grad_accumulation_steps: int=1,
+                 beta_max: float=1,
+                 beta_anneal_steps: int=4,
                  fp16: bool=True,
                  tsne: int=0,
                  seed: int=42,
                  data_path: str="data/concatenated_anekdot_dataset.csv",
                  tokenizer_path: str="outputs/tokenizers/tokenizer.json ",
                  model_dir: str="outputs/models",
+                 resume: str | None=None,
+
+                 teacher: str | None=None,
+                 distill_coef: float | None=None,
                  ):
         self.train_batch_size = train_batch_size
         self.val_batch_size = val_batch_size
@@ -63,11 +71,15 @@ class TrainingConfig:
         self.train_tokenizer = train_tokenizer
         self.warmup_steps = warmup_steps
         self.grad_accumulation_steps = grad_accumulation_steps
+        self.beta_max = beta_max
+        self.beta_anneal_steps = beta_anneal_steps
         self.fp16 = fp16
-        self.tsne = tsne,
+        self.tsne = tsne
         self.seed = seed
         self.data_path = data_path
         self.tokenizer_path = tokenizer_path
         self.model_dir = model_dir
-        
-        
+        self.resume = resume
+
+        self.teacher = teacher
+        self.distill_coef = distill_coef

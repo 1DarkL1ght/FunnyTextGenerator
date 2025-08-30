@@ -17,6 +17,7 @@ class FPVAETransformerEncoder(nn.Module):
                  dropout: float,
                  vocab_size: int,
                  max_len: int,
+                 reduction: str="sum",
                  batch_first: bool=True,
                  ):
         super().__init__()
@@ -32,18 +33,23 @@ class FPVAETransformerEncoder(nn.Module):
                                                        d_model=d_model,
                                                        latent_dim=latent_dim,
                                                        num_layers=num_layers,
+                                                       max_len=max_len,
+                                                       reduction=reduction,
                                                        )
     
 
     def forward(self,
                 src: torch.Tensor,
                 src_key_padding_mask: torch.Tensor | None=None,
-                ) -> torch.Tensor:
+                ) -> tuple[list[torch.Tensor],
+                           list[torch.Tensor],
+                           list[torch.Tensor]
+                           ]:
         out = self.embedding(src)
         out = self.pe(out)
-        z = self.encoder(out, src_key_padding_mask=src_key_padding_mask)
+        mu, log_var, out = self.encoder(out, src_key_padding_mask=src_key_padding_mask)
 
-        return z
+        return mu, log_var, out
 
 
 class FPVAETransformerDecoder(nn.Module):
@@ -61,7 +67,7 @@ class FPVAETransformerDecoder(nn.Module):
                  ):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, d_model)
-        self.pe = fpvt_modules.PositionalEncoding(d_model, max_len=max_len)
+        self.pe = fpvt_modules.PositionalEncoding(d_model, max_len=max_len+1)
         decoder_layer = fpvt_modules.TransformerDecoderLayer(d_model=d_model,
                                                              nhead=nhead,
                                                              dim_feedforward=dim_feedforward,
@@ -75,24 +81,23 @@ class FPVAETransformerDecoder(nn.Module):
                                                        latent_dim=latent_dim,
                                                        num_layers=num_layers,
                                                        )
+        self.fc = nn.Linear(d_model, vocab_size)
 
 
     def forward(self,
                 tgt: torch.Tensor,
-                memory: torch.Tensor,
+                memory: list[torch.Tensor],
                 memory_key_padding_mask: torch.Tensor | None=None,
-                tgt_mask: torch.Tensor | None=None,
-                tgt_key_padding_mask: torch.Tensor | None=None,
+                full_tgt_mask: torch.Tensor | None=None,
                 ) -> torch.Tensor:
         out = self.embedding(tgt)
         out = self.pe(out)
         out = self.decoder(out,
                            memory,
                            memory_key_padding_mask=memory_key_padding_mask,
-                           tgt_mask=tgt_mask,
-                           tgt_key_padding_mask=tgt_key_padding_mask,
+                           full_tgt_mask=full_tgt_mask,
                            )
-        return out
+        return self.fc(out)
     
 
 class FPVAETransformerModel(nn.Module):
@@ -107,6 +112,7 @@ class FPVAETransformerModel(nn.Module):
                  max_len: int,
                  batch_size: int,
                  layer_norm_eps: float=0.00001,
+                 reduction: str="sum",
                  batch_first: bool=True,
                  ):
         super().__init__()
@@ -118,6 +124,7 @@ class FPVAETransformerModel(nn.Module):
                                                dropout=dropout,
                                                vocab_size=vocab_size,
                                                max_len=max_len,
+                                               reduction=reduction,
                                                batch_first=batch_first
                                                )
         self.decoder = FPVAETransformerDecoder(d_model=d_model,
@@ -135,36 +142,38 @@ class FPVAETransformerModel(nn.Module):
 
     def forward(self,
                 src: torch.Tensor,
-                eos_id: int,
+                eos_id: int=1,
                 src_key_padding_mask: torch.Tensor | None=None,
-                tgt_mask: torch.Tensor | None=None,
-                tgt_key_padding_mask: torch.Tensor | None=None,
-                ) -> tuple[torch.Tensor,
-                           torch.Tensor,
-                           torch.Tensor]:
+                full_tgt_mask: torch.Tensor | None=None,
+                ) -> tuple[list[torch.Tensor],
+                           list[torch.Tensor],
+                           list[torch.Tensor]
+                           ]:
         batch_size = src.shape[0]
         shift = torch.tensor([eos_id] * batch_size, dtype=torch.long).unsqueeze(1).to(src.device)
         shifted_src = torch.cat([shift, src], dim=-1)
 
-        mu_pyramid, log_var_pyramid, z = self.encoder(src, src_key_padding_mask=src_key_padding_mask)
+        mu, log_var, z = self.encoder(src, src_key_padding_mask=src_key_padding_mask)
         out = self.decoder(shifted_src,
                            z,
-                           memory_key_padding_mask=src_key_padding_mask,
-                           tgt_mask=tgt_mask,
-                           tgt_key_padding_mask=tgt_key_padding_mask,
-                           )
+                           memory_key_padding_mask=None, # src_key_padding_mask
+                           full_tgt_mask=full_tgt_mask,
+                           )[:, :-1]
         
-        return mu_pyramid, log_var_pyramid, out
+        return mu, log_var, out
 
     def forward_inference(self, noise, eos_id, beam_size=5, max_len=200, repetition_penalty=1.2, length_norm_factor=0.6):
-        batch_size = noise.shape[0]
-        device = noise.device
-        vocab_size = self.decoder.fc.out_features  # Размер словаря
+        batch_size = noise[0].shape[0]
+        device = noise[0].device
+        # vocab_size = self.decoder.fc.out_features  # Размер словаря
     
         # Инициализация beam для каждого элемента батча
         beams = [[{'seq': torch.tensor([eos_id], dtype=torch.long, device=device), 'score': 0.0}] for _ in range(batch_size)]
         finished_beams = [ [] for _ in range(batch_size) ]
-    
+
+        # FPN forward pass
+        # _, _, z = self.encoder.encoder.fpn(noise)
+
         for _ in range(max_len):
             new_beams = [[] for _ in range(batch_size)]
             for b in range(batch_size):
@@ -175,7 +184,8 @@ class FPVAETransformerModel(nn.Module):
                         finished_beams[b].append(beam)
                         continue
                     # Предсказываем следующий токен
-                    out = self.decoder(seq, noise[b:b+1], tgt_is_causal=False)
+                    
+                    out = self.decoder(seq, noise)
                     logits = out[:, -1, :]  # [1, vocab_size]
                     log_probs = F.log_softmax(logits, dim=-1)  # Логарифмические вероятности
                     # Применяем repetition penalty

@@ -23,9 +23,9 @@ class Precision:
         pred = torch.argmax(input, dim=-1)
 
         if self.ignore_index is not None:
-            valid_mask = (target != self.ignore_index)
+            valid_mask = (pred != self.ignore_index)
         else:
-            valid_mask = torch.ones_like(target, dtype=torch.bool, device=self.device)
+            valid_mask = torch.ones_like(pred, dtype=torch.bool, device=self.device)
 
         matched = (pred == target) & valid_mask
         self.num_matched_tokens += matched.sum()
