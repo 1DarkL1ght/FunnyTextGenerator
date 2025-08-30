@@ -1,17 +1,18 @@
 data_path: data/concatenated_anekdot_dataset.csv
-train_batch_size: 8
+train_batch_size: 16
 val_batch_size: 8
 train_size: 0.8
 epochs: 200
-lr: 5e-5
+lr: 1e-5
 weight_decay: 1e-4
 fp16: True
 d_model: 512
 nhead: 8
 dim_feedforward: 2048
-num_layers: 8
+reduction: sum
+num_layers: 4
 vocab_size: 50000
-max_len: 300
+max_len: 500
 model_dir: outputs/models
 optim: AdamW
 device: cuda
@@ -22,10 +23,19 @@ train_tokenizer: False
 tokenizer_path: outputs/tokenizers/tokenizer.json 
 seed: 42
 dropout: 0.1
-latent_dim: 512
-tsne: 0
-grad_accumulation_steps: 8
-warmup_steps: 1
+latent_dim: 256
+tsne: 150
+grad_accumulation_steps: 16
+warmup_steps: 1 # in epochs
+beta_max: 1
+beta_anneal_steps: 4 # in epochs
+
+# resume: outputs/models/TransformerAnekdotGenerator_last.pt
+
+# distillation-specific
+# teacher: path_to_teacher_model
+# distill_coef: 1
+
 
 
 # TRY CYCLIC LR!!!
