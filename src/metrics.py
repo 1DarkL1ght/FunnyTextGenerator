@@ -12,12 +12,16 @@ class Metrics(Enum):
 
 
 class Precision:
-    def __init__(self, ignore_index: int | None = None, device: str = "cuda"):
+    def __init__(
+        self,
+        ignore_index: int | None = None,
+        device: str = "cuda",
+    ):
         self.device = device
         self.num_matched_tokens = torch.tensor(0, device=self.device)
         self.num_tokens_in_gt_sequences = torch.tensor(0, device=self.device)
         self.num_tokens_in_pred_sequence = torch.tensor(0, device=self.device)
-        self.ignore_index = torch.tensor(ignore_index, device=self.device)
+        self.ignore_index = ignore_index
 
     def update(self, input: torch.Tensor, target: torch.Tensor):
         pred = torch.argmax(input, dim=-1)
@@ -48,7 +52,7 @@ class Recall:
         self.device = device
         self.num_matched_tokens = torch.tensor(0, device=self.device)
         self.num_tokens_in_gt_sequences = torch.tensor(0, device=self.device)
-        self.ignore_index = torch.tensor(ignore_index, device=self.device)
+        self.ignore_index = ignore_index
 
     def update(self, input: torch.Tensor, target: torch.Tensor):
         pred = torch.argmax(input, dim=-1)

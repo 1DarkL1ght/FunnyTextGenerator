@@ -1,44 +1,40 @@
 data_path: data/concatenated_anekdot_dataset.csv
 train_batch_size: 16
-val_batch_size: 8
+val_batch_size: 32
 train_size: 0.8
-epochs: 200
-lr: 1e-5
-weight_decay: 1e-4
+epochs: 100
+lr: 2e-4
+weight_decay: 1e-3
 fp16: True
-d_model: 512
-nhead: 8
-dim_feedforward: 2048
+d_model: 1024
+nhead: 16
+dim_feedforward: 4096
 reduction: sum
-num_layers: 4
+num_layers: 24
 vocab_size: 50000
-max_len: 500
+max_len: 150
 model_dir: outputs/models
 optim: AdamW
 device: cuda
-patience: 25
+patience: 10
 inference_size: 4
-word_dropout: 0
 train_tokenizer: False
-tokenizer_path: outputs/tokenizers/tokenizer.json 
+tokenizer_path: outputs/tokenizers/tokenizer.json
 seed: 42
 dropout: 0.1
-latent_dim: 256
-tsne: 150
-grad_accumulation_steps: 16
-warmup_steps: 1 # in epochs
-beta_max: 1
-beta_anneal_steps: 4 # in epochs
-
+word_dropout: 0.0 # for decoder
+mask_p: 0.0
+latent_dim: 64
+tsne: 1
+grad_accumulation_steps: 8
+warmup_steps: 0.3 # in epochs
+beta_max: 1.0
+beta_anneal_steps: 50 # in epochs
+beta_warmup_steps: 20 # in epochs
+gaussian_nll: False
+  
 # resume: outputs/models/TransformerAnekdotGenerator_last.pt
 
-# distillation-specific
-# teacher: path_to_teacher_model
-# distill_coef: 1
-
-
-
-# TRY CYCLIC LR!!!
-# Add augmentations: pop random word, synonym augmentation
-# Reduce model size (probably bad idea)
-# best with lr 5e-3 wd 1e-3  AdamW ed 0.2 dd 0.1 kln 0.1 beta 0.001 ld 256 dm 256 nhd 8  dff 1024 nl 4 vs 50000 ml 300 seed 42
+# @TODO: REFACTOR ALL!!!
+# Maybe cyclical beta scheduler
+# How to implement with beta warmup???

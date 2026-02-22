@@ -1,34 +1,34 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torchtune
 from torchtune import modules
 
 
 class PositionalEncoding(nn.Module):
-   def __init__(self,
-                d_model: int,
-                max_len: int=500,
-                ):
-       super().__init__()
-       self.d_model = d_model
-       self.max_len = max_len
+    def __init__(
+        self,
+        d_model: int,
+        max_len: int=500,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.max_len = max_len
 
-       # Create a positional encoding matrix
-       pe = torch.zeros(max_len, d_model)
-       position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-       div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
-       pe[:, 0::2] = torch.sin(position * div_term)
-       pe[:, 1::2] = torch.cos(position * div_term)
-       pe = pe.unsqueeze(0)
+        # Create a positional encoding matrix
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
         
-       self.register_buffer('pe', pe)
+        self.register_buffer('pe', pe)
 
-   def forward(self, x) -> torch.Tensor:
-       # Add positional embeddings to input token embeddings
-       x = x + self.pe[:, :x.size(1), :]
+    def forward(self, x) -> torch.Tensor:
+        # Add positional embeddings to input token embeddings
+        x = x + self.pe[:, :x.size(1), :]
 
-       return x
+        return x
    
 
 class FeaturePyramidNetwork(nn.Module):
@@ -86,18 +86,6 @@ class FeaturePyramidNetwork(nn.Module):
         return outputs[::-1]
 
 
-    # def forward(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | ValueError:
-    #     if self.reduction == "sum":
-    #         reduced_src = torch.cat([src[:, i:, :, :].sum(dim=1).unsqueeze(1) for i in range(self.num_layers)], dim=1)
-    #     elif self.reduction == "mean":
-    #         reduced_src = torch.cat([src[:, i:, :, :].mean(dim=1).unsqueeze(1) for i in range(self.num_layers)], dim=1)
-    #     else:
-    #         raise ValueError("FetaurePyramidNetwork got an unsopported reduction type. Use \"sum\" or \"mean\" instead.")
-    #     mu_pyramid = torch.cat([self.mu_layers[i](reduced_src[:, i, :, :]).unsqueeze(1) for i in range(self.num_layers)], dim=1)
-    #     log_var_pyramid = torch.cat([self.log_var_layers[i](reduced_src[:, i, :, :]).unsqueeze(1) for i in range(self.num_layers)], dim=1)
-
-    #     return (mu_pyramid, log_var_pyramid)
-
     def forward(self, src: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]] | ValueError:
         self._interpolate_lengths(src)
 
@@ -120,25 +108,41 @@ class TransformerEncoder(nn.Module):
                  reduction="sum",
                  ):
         super().__init__()
-        self.encoder_layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
-        self.fpn = FeaturePyramidNetwork(d_model=d_model,
-                                         latent_dim=latent_dim,
-                                         num_layers=num_layers,
-                                         max_len=max_len,
-                                         reduction=reduction,
-                                         )
+        # self.encoder_layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=num_layers,
+        )
+        # self.fpn = FeaturePyramidNetwork(d_model=d_model,
+        #                                  latent_dim=latent_dim,
+        #                                  num_layers=num_layers,
+        #                                  max_len=max_len,
+        #                                  reduction=reduction,
+        #                                  )
+        
+        self.mu_layer = nn.Linear(d_model, latent_dim)
+        self.log_var_layer = nn.Linear(d_model, latent_dim)
+
+        nn.init.xavier_normal_(self.mu_layer.weight)
+        nn.init.zeros_(self.mu_layer.bias)
+
+        nn.init.xavier_normal_(self.log_var_layer.weight)
+        nn.init.zeros_(self.log_var_layer.bias)
 
 
     def reparametrize(self,
                       mu_pyramid: list[torch.Tensor],
                       log_var_pyramid: list[torch.Tensor],
                       ) -> list[torch.Tensor]:
-        z = []
+        # z = []
 
-        for i in range(len(mu_pyramid)):
-            std = torch.exp(0.5 * log_var_pyramid[i])
-            eps = torch.randn_like(std)
-            z.append(mu_pyramid[i] + std * eps)
+        # for i in range(len(mu_pyramid)):
+        #     std = torch.exp(0.5 * log_var_pyramid[i])
+        #     eps = torch.randn_like(std)
+        #     z.append(mu_pyramid[i] + std * eps)
+        std = torch.exp(0.5 * log_var_pyramid)
+        eps = torch.randn_like(std)
+        z = mu_pyramid + std * eps
 
         return z
 
@@ -149,21 +153,29 @@ class TransformerEncoder(nn.Module):
                 ) -> tuple[list[torch.Tensor],
                            list[torch.Tensor],
                            list[torch.Tensor]]:
-        self.feature_pyramid = []
+        # self.feature_pyramid = []
         """
         TODO:
         1. Move reparametrazie to before pyramid to decrease amout of computations
         2. Different latent seq lengths for different scales of vectors
         """
         out = src
-        for layer in self.encoder_layers:
-            out = layer(out, src_key_padding_mask=src_key_padding_mask)
-            self.feature_pyramid.append(out.unsqueeze(1))
-        out = torch.cat(self.feature_pyramid, dim=1)
-        mu_pyramid, log_var_pyramid = self.fpn(out)
+        # for layer in self.encoder_layers:
+        #     out = layer(out, src_key_padding_mask=src_key_padding_mask)
+        #     self.feature_pyramid.append(out.unsqueeze(1))
+        # out = torch.cat(self.feature_pyramid, dim=1)
+        # mu_pyramid, log_var_pyramid = self.fpn(out)
 
-        z = self.reparametrize(mu_pyramid, log_var_pyramid)
-        return mu_pyramid, log_var_pyramid, z
+        # z = self.reparametrize(mu_pyramid, log_var_pyramid)
+        # return mu_pyramid, log_var_pyramid, z
+        # for layer in self.encoder_layers:
+        #     out = layer(out, src_key_padding_mask=src_key_padding_mask)
+        out = self.encoder(out, src_key_padding_mask=src_key_padding_mask)
+        out = out.mean(dim=1).unsqueeze(1)
+        mu = self.mu_layer(out)
+        log_var = self.log_var_layer(out)
+        z = self.reparametrize(mu, log_var)
+        return mu, log_var, z
    
 
 class TransformerDecoderLayer(nn.Module):
@@ -212,7 +224,7 @@ class TransformerDecoderLayer(nn.Module):
                                                                                         dtype=torch.float32,
                                                                                         ),
                                                                max_seq_len=max_len,
-                                                               is_causal=True,
+                                                               is_causal=False,
                                                                )
         self.layer_norm_2 = nn.LayerNorm(eps=layer_norm_eps, normalized_shape=d_model)
         self.feed_forward = nn.Sequential(
@@ -256,16 +268,16 @@ class TransformerDecoderLayer(nn.Module):
                                                   mask=full_tgt_mask,
                                                   )
         skip_connection_output = self.layer_norm_1(self_attn_out + tgt)
-        cross_attn_output = self.cross_attention_layer(x=tgt,
+        cross_attn_output = self.cross_attention_layer(x=skip_connection_output,
                                                        y=memory,
                                                        mask=memory_key_padding_mask,
                                                        )
-        skip_connection_output = self.layer_norm_1(cross_attn_output + tgt)
+        skip_connection_output = self.layer_norm_2(cross_attn_output + skip_connection_output)
         feedforward_output = self.feed_forward(skip_connection_output)
         skip_connection_output = self.layer_norm_3(feedforward_output + skip_connection_output)
 
-        self.self_attention_layer.reset_cache()
-        self.cross_attention_layer.reset_cache()
+        # self.self_attention_layer.reset_cache()
+        # self.cross_attention_layer.reset_cache()
 
         return skip_connection_output
     
@@ -290,7 +302,7 @@ class TransformerDecoder(nn.Module):
                 full_tgt_mask: torch.Tensor | None=None,
                 ) -> torch.Tensor:
         out = tgt
-        upscaled_memory = [self.upscale_layers[i](memory[i]) for i in range(self.num_layers)]
+        upscaled_memory = [self.upscale_layers[i](memory) for i in range(self.num_layers)]
         for i, layer in enumerate(self.decoder_layers):
             out = layer(out,
                         upscaled_memory[i],

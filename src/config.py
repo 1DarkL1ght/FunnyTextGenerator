@@ -39,20 +39,23 @@ class TrainingConfig:
                  patience: int=25,
                  inference_size: int=4,
                  word_dropout: float=0,
+                 mask_p: float=0,
                  max_len: int=300,
                  optimizer: str="AdamW",
                  device: str="cuda",
                  train_tokenizer: bool=True,
-                 warmup_steps: int=1,
+                 warmup_steps: float=1.0,
                  grad_accumulation_steps: int=1,
                  beta_max: float=1,
-                 beta_anneal_steps: int=4,
+                 beta_anneal_steps: int=50,
+                 beta_warmup_steps: int=20,
                  fp16: bool=True,
                  tsne: int=0,
                  seed: int=42,
                  data_path: str="data/concatenated_anekdot_dataset.csv",
                  tokenizer_path: str="outputs/tokenizers/tokenizer.json ",
                  model_dir: str="outputs/models",
+                 gaussian_nll: bool=False,
                  resume: str | None=None,
 
                  teacher: str | None=None,
@@ -65,6 +68,7 @@ class TrainingConfig:
         self.patience = patience
         self.inference_size = inference_size
         self.word_dropout = word_dropout
+        self.mask_p = mask_p
         self.max_len = max_len
         self.optimizer = optimizer
         self.device = device
@@ -73,12 +77,14 @@ class TrainingConfig:
         self.grad_accumulation_steps = grad_accumulation_steps
         self.beta_max = beta_max
         self.beta_anneal_steps = beta_anneal_steps
+        self.beta_warmup_steps = beta_warmup_steps
         self.fp16 = fp16
         self.tsne = tsne
         self.seed = seed
         self.data_path = data_path
         self.tokenizer_path = tokenizer_path
         self.model_dir = model_dir
+        self.gaussian_nll = gaussian_nll
         self.resume = resume
 
         self.teacher = teacher

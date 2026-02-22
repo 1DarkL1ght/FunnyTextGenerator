@@ -5,3 +5,11 @@ tokenizers
 transformers
 matplotlib
 tqdm
+scikit-learn
+tensorboard
+jsonargparse
+torchtune
+torchao
+torcheval
+rich
+torchmetrics

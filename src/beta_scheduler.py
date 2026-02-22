@@ -1,9 +1,10 @@
 class BetaScheduler:
-    def __init__(self, beta_anneal_steps: int, beta_max: float=1):
+    def __init__(self, beta_anneal_steps: int, beta_warmup_steps: int, beta_max: float=1):
         self.beta_anneal_steps = beta_anneal_steps
         self.beta_max = beta_max
         self.current_step = 0
         self.beta_curr = 0
+        self.beta_warmup_steps = beta_warmup_steps
 
 
     def state_dict(self) -> dict[str, int | float]:
@@ -11,7 +12,8 @@ class BetaScheduler:
             "beta_anneal_steps": self.beta_anneal_steps,
             "beta_max": self.beta_max,
             "current_step": self.current_step,
-            "beta_curr": self.beta_curr
+            "beta_curr": self.beta_curr,
+            "beta_warmup_steps": self.beta_warmup_steps,
         }
     
 
@@ -20,9 +22,10 @@ class BetaScheduler:
         self.beta_max = state_dict["beta_max"]
         self.current_step = state_dict["current_step"]
         self.beta_curr = state_dict["beta_curr"]
+        self.beta_warmup_steps = self.state_dict["beta_warmup_steps"]
 
 
     def step(self) -> None:
         self.current_step += 1
-        self.beta_curr = min(self.beta_max, self.beta_max * self.current_step / self.beta_anneal_steps)
+        self.beta_curr = min(self.beta_max, max(0, self.beta_max * (self.current_step - self.beta_warmup_steps) / self.beta_anneal_steps))
         return self.beta_curr

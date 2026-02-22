@@ -19,7 +19,7 @@ class CustomTokenizer:
         self.eos_id = None
         self.pad_id = None
         self.unk_id = None
-        self.tokenizer.post_processor = None
+        self.mask_id = None
 
     def load(self, path):
         self.tokenizer = Tokenizer.from_file(path)

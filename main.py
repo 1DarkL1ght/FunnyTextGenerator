@@ -27,7 +27,6 @@ def main(args_path: Path | str):
         args: dict = yaml.safe_load(f)
 
     print("Config loaded")
-
     model_config = ModelConfig(
         d_model=int(args["d_model"]),
         latent_dim=int(args["latent_dim"]),
@@ -50,20 +49,23 @@ def main(args_path: Path | str):
         patience=int(args["patience"]),
         inference_size=int(args["inference_size"]),
         word_dropout=float(args["word_dropout"]),
+        mask_p=float(args["mask_p"]),
         max_len=int(args["max_len"]),
         optimizer=args["optim"],
         device=args["device"],
         train_tokenizer=bool(args["train_tokenizer"]),
-        warmup_steps=int(args["warmup_steps"]),
+        warmup_steps=float(args["warmup_steps"]),
         grad_accumulation_steps=int(args["grad_accumulation_steps"]),
         beta_max = float(args["beta_max"]),
         beta_anneal_steps = int(args["beta_anneal_steps"]),
+        beta_warmup_steps= int(args["beta_warmup_steps"]),
         fp16=bool(args["fp16"]),
         tsne=int(args["tsne"]),
         seed=int(args["seed"]),
         data_path=args["data_path"],
         tokenizer_path=args["tokenizer_path"],
         model_dir=args["model_dir"],
+        gaussian_nll=bool(args["gaussian_nll"]),
 
         resume=args.get("resume"),
         
