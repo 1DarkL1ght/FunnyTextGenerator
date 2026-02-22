@@ -10,7 +10,7 @@ d_model: 1024
 nhead: 16
 dim_feedforward: 4096
 reduction: sum
-num_layers: 24
+num_layers: 12
 vocab_size: 50000
 max_len: 150
 model_dir: outputs/models
