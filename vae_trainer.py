@@ -4,7 +4,6 @@ import builtins
 
 import torch
 from torch import nn
-import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torch import autocast
@@ -24,7 +23,7 @@ from src.tokenizer import CustomTokenizer
 from src.utils import EarlyStopping, create_padding_mask
 from src.metrics import Precision, Recall, Metrics
 from torchmetrics.classification import MulticlassPrecision, MulticlassRecall
-from src.beta_scheduler import BetaScheduler
+from src.beta_scheduler import BetaScheduler, CyclicBetaScheduler
 from src.loss import VAELoss
 
 # @TODO Distillation
@@ -57,10 +56,11 @@ class Trainer:
         self.current_epoch = 0
         self.train_epoch_len: int | None=None
         self.val_epoch_len: int | None=None
-        self.beta_scheduler: BetaScheduler | None=None
+        self.beta_scheduler: BetaScheduler | CyclicBetaScheduler | None=None
         self.best_loss = float("inf")
         self.patience_step = 0
         self.loss: VAELoss | None = None
+        self.tsne: int = self.training_config.tsne
 
 
     def _load_pd_dataframe(self) -> None:
@@ -111,11 +111,17 @@ class Trainer:
                                                          self.training_config.warmup_steps * len(self.trainloader),
                                                          self.training_config.num_epochs * len(self.trainloader))
         
-        self.beta_scheduler = BetaScheduler(
-            beta_max=self.training_config.beta_max,
-            beta_anneal_steps=self.training_config.beta_anneal_steps * self.train_epoch_len,
-            beta_warmup_steps=self.training_config.beta_warmup_steps * self.train_epoch_len,
-            )
+        # self.beta_scheduler = BetaScheduler(
+        #     beta_max=self.training_config.beta_max,
+        #     beta_anneal_steps=self.training_config.beta_anneal_steps * self.train_epoch_len,
+        #     beta_warmup_steps=self.training_config.beta_warmup_steps * self.train_epoch_len,
+        #     )
+        self.beta_scheduler = CyclicBetaScheduler(
+            cycle_length=self.train_epoch_len * self.training_config.beta_anneal_cycle_length,
+            beta_max_base=self.training_config.beta_max_base,
+            ratio=self.training_config.beta_anneal_ramp_ratio,
+            warmup_cycles=self.training_config.beta_anneal_warmup_cycles,
+        )
 
         self.scheduler.step()
 
@@ -172,27 +178,9 @@ class Trainer:
                                            unk_id=self.tokenizer.unk_id,
                                            ).to(self.training_config.device)
         
-        for name, module in self.model.named_modules():
-            if isinstance(module, nn.Linear):
-                if 'self_attention_layer' in name or 'cross_attention_layer' in name:
-                    nn.init.xavier_uniform_(module.weight, gain=1/np.sqrt(2))
-                else:
-                    nn.init.xavier_uniform_(module.weight)
-                
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-
-        if hasattr(self.model.encoder.encoder, 'mu_layer'):
-            nn.init.xavier_normal_(self.model.encoder.encoder.mu_layer.weight)
-            nn.init.zeros_(self.model.encoder.encoder.mu_layer.bias)
-
-        if hasattr(self.model.encoder.encoder, 'log_var_layer'):
-            nn.init.xavier_normal_(self.model.encoder.encoder.log_var_layer.weight)
-            nn.init.zeros_(self.model.encoder.encoder.log_var_layer.bias)
+        for layer in self.model.children():
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
         
         optims: dict[str, torch.optim.Optimizer] = {
             "RAdam": torch.optim.RAdam,
@@ -265,6 +253,13 @@ class Trainer:
         for tag, value in kwargs.items():
             self.writer.add_scalar(f"{main_tag}/{tag}", value, step)
 
+    def tgt_dropout_mask(self):
+        dropout_mask = torch.rand(
+            self.training_config.max_len+1,
+            self.training_config.max_len+1,
+            device=self.training_config.device,
+        ) < self.training_config.word_dropout
+        return dropout_mask
 
     def _forward_pass(self, batch: torch.Tensor) -> tuple[tuple[torch.Tensor,
                                                                 torch.Tensor,
@@ -283,6 +278,9 @@ class Trainer:
         tgt_key_padding_mask = tgt_key_padding_mask[:, None, :].to(torch.float)  # [B, 1, T]
         tgt_key_padding_mask = tgt_key_padding_mask.masked_fill(tgt_key_padding_mask.bool(), float("-inf"))  # [B,1,T]
 
+        if self.model.training and self.training_config.word_dropout > 0:
+            tgt_mask = tgt_mask.masked_fill(self.tgt_dropout_mask(), float("-inf"))
+
         full_tgt_mask = tgt_mask + tgt_key_padding_mask
 
         if self.training_config.fp16:
@@ -293,7 +291,7 @@ class Trainer:
                                           full_tgt_mask=full_tgt_mask,
                                           )
                 # ce_loss, kl__loss = self._loss_fn(*model_output, batch)
-                ce_loss, kl_loss = self.loss(*model_output, batch)
+                ce_loss, kl_loss, kl_loss_ind = self.loss(*model_output, batch)
 
                 # if self.training_config.teacher is not None:
                 #     teacher_output
@@ -304,11 +302,12 @@ class Trainer:
                                           full_tgt_mask=full_tgt_mask,
                                           )
             # ce_loss, kl_loss = self._loss_fn(*model_output, batch)
-            ce_loss, kl_loss = self.loss(*model_output, batch)
+            ce_loss, kl_loss, kl_loss_ind = self.loss(*model_output, batch)
 
         return model_output, \
-               ce_loss / self.training_config.grad_accumulation_steps, \
-               kl_loss / self.training_config.grad_accumulation_steps
+               ce_loss, \
+               kl_loss, \
+               kl_loss_ind
     
 
     def _training_step(self, batch: torch.Tensor) -> tuple[tuple[torch.Tensor,
@@ -318,8 +317,8 @@ class Trainer:
                                                            torch.Tensor]:
         torch.compiler.cudagraph_mark_step_begin()
         batch = batch.to(self.training_config.device)
-        model_output, ce_loss, kl_loss = self._forward_pass(batch)
-        sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss) / self.training_config.grad_accumulation_steps
+        model_output, ce_loss, kl_loss, kl_loss_ind = self._forward_pass(batch)
+        sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss + self.beta_scheduler.beta_curr * kl_loss_ind) / self.training_config.grad_accumulation_steps
 
         if self.training_config.fp16:
             self.scaler.scale(sum_loss).backward()
@@ -347,8 +346,9 @@ class Trainer:
         self.training_step += 1
 
         self._tb_log("lr", {"lr": self.scheduler.get_last_lr()[0]})
+        self._tb_log("beta", {"beta": self.beta_scheduler.beta_curr})
         
-        return model_output, ce_loss * self.training_config.grad_accumulation_steps, kl_loss * self.training_config.grad_accumulation_steps
+        return model_output, ce_loss, kl_loss, kl_loss_ind
     
 
     def _cut_at_eos(self, ids):
@@ -362,12 +362,11 @@ class Trainer:
         return out
 
 
-    def _update_metrics(self,
-                        input: torch.Tensor,
-                        target: torch.Tensor) -> Metrics:
-        
-
-
+    def _update_metrics(
+        self,
+        input: torch.Tensor,
+        target: torch.Tensor,
+    ) -> None:
         decoded_pred_texts = [self.tokenizer.decode(self._cut_at_eos(out_seq)) for out_seq in input.argmax(dim=-1)]
         decoded_target_texts = [self.tokenizer.decode(self._cut_at_eos(out_seq)) for out_seq in target]
 
@@ -403,11 +402,11 @@ class Trainer:
                                                              ]:
         batch = batch.to(self.training_config.device)
         with torch.no_grad():
-            model_output, ce_loss, kl_loss = self._forward_pass(batch)
+            model_output, ce_loss, kl_loss, kl_loss_ind = self._forward_pass(batch)
 
         self._update_metrics(model_output[-1], batch)
 
-        return model_output, ce_loss * self.training_config.grad_accumulation_steps, kl_loss * self.training_config.grad_accumulation_steps
+        return model_output, ce_loss, kl_loss, kl_loss_ind
 
 
     def _training_epoch(self,
@@ -420,27 +419,30 @@ class Trainer:
 
         running_ce_loss = 0
         running_kl_loss = 0
+        running_kl_loss_ind = 0
 
         for data in self.trainloader:
-            model_output, ce_loss, kl_loss = self._training_step(data)
+            model_output, ce_loss, kl_loss, kl_loss_ind = self._training_step(data)
 
             progress.update(
                 step_task,
                 advance=1,
-                info=f"Step: {local_training_step}/{self.train_epoch_len} beta={self.beta_scheduler.beta_curr:.5f} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Lr={self.scheduler.get_last_lr()[0]:.8f}"
+                info=f"Step: {local_training_step}/{self.train_epoch_len} beta={self.beta_scheduler.beta_curr:.5f} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} KL_I={kl_loss_ind.item():.4f} Lr={self.scheduler.get_last_lr()[0]:.8f}"
             )
 
             running_ce_loss += ce_loss.item()
             running_kl_loss += kl_loss.item()
+            running_kl_loss_ind += kl_loss_ind.item()
 
             local_training_step += 1
 
         running_ce_loss /= len(self.trainloader)
         running_kl_loss /= len(self.trainloader)
+        running_kl_loss_ind /= len(self.trainloader)
 
-        self._tb_log("train", {"ce_loss": running_ce_loss, "kl_loss": running_kl_loss})
+        self._tb_log("train", {"ce_loss": running_ce_loss, "kl_loss": running_kl_loss, "kl_loss_ind": running_kl_loss_ind})
 
-        return running_ce_loss, running_kl_loss
+        return running_ce_loss, running_kl_loss, running_kl_loss_ind
 
 
     def _validatin_epoch(self,
@@ -458,42 +460,40 @@ class Trainer:
 
         running_ce_loss = 0
         running_kl_loss = 0
+        running_kl_loss_ind = 0
+        self.tsne = self.training_config.tsne
 
         mu_arr = []
-        for i, data in enumerate(self.valloader):
-            (mu, log_var, out), ce_loss, kl_loss = self._validation_step(data)
-            
-            # Delete outputs
-            del log_var
-            del out
-            torch.cuda.empty_cache()
+        with torch.no_grad():
+            for i, data in enumerate(self.valloader):
+                (mu, log_var, out), ce_loss, kl_loss, kl_loss_ind = self._validation_step(data)
 
-            if self.training_config.tsne > 0:
-                if i % self.training_config.tsne == 0:
-                    mu_arr.append(mu[0].squeeze(1).detach().cpu())
+                if self.training_config.tsne > 0 and self.tsne > 0:
+                    mu_arr.append(mu)
+                    self.tsne -= self.training_config.val_batch_size
 
-            metrics = self._compute_metrics()
-            progress.update(
-                step_task,
-                advance=1,
-                info=f'Step: {local_validation_step}/{self.val_epoch_len} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Perplexity={metrics["perplexity"]:.4f} \
+                metrics = self._compute_metrics()
+                progress.update(
+                    step_task,
+                    advance=1,
+                    info=f'Step: {local_validation_step}/{self.val_epoch_len} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} KL_I={kl_loss_ind.item():.4f} Perplexity={metrics["perplexity"]:.4f} \
 WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R={metrics["recall"]:.4f}'
-            )
+                )
 
-            running_ce_loss += ce_loss.item()
-            running_kl_loss += kl_loss.item()
-            
-            local_validation_step += 1
+                running_ce_loss += ce_loss.item()
+                running_kl_loss += kl_loss.item()
+                running_kl_loss_ind += kl_loss_ind.item()
+                
+                local_validation_step += 1
 
         running_ce_loss /= len(self.valloader)
         running_kl_loss /= len(self.valloader)
+        running_kl_loss_ind /= len(self.valloader)
 
         if self.training_config.tsne > 0 and self.current_epoch % 10 == 0:
-            mu_arr_tensor = torch.cat(mu_arr, dim=0).squeeze(1)
+            mu_arr_tensor = torch.cat(mu_arr, dim=0).detach().cpu()
             metadata = [str(self.current_epoch) for i in range(mu_arr_tensor.size(0))]
-            # mu_2d = tsne_projector.fit_transform(mu_arr_tensor.numpy())
-
-            self.writer.add_embedding(mat=torch.from_numpy(mu_arr_tensor.numpy()),
+            self.writer.add_embedding(mat=mu_arr_tensor,
                                       metadata=metadata,
                                       tag="latent-space",
                                       global_step=self.current_epoch
@@ -501,16 +501,17 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
 
         metrics = self._compute_metrics()
 
-        self._tb_log("val", {"ce_loss": running_ce_loss, "kl_loss": running_kl_loss})
+        self._tb_log("val", {"ce_loss": running_ce_loss, "kl_loss": running_kl_loss, "kl_loss_ind": running_kl_loss_ind})
         self._tb_log("metrics", metrics)
 
-        return running_ce_loss, running_kl_loss, metrics, mu_arr
+        return running_ce_loss, running_kl_loss, running_kl_loss_ind, metrics, mu_arr
 
 
     def _inference(self):
         texts = []
 
         seq_lengths = torch.linspace(1, self.training_config.max_len, self.training_config.inference_size, dtype=torch.int32)
+        self.model.setup_inference()
         for i in range(self.training_config.inference_size):
             # rand_seq_len = random.randint(20, self.training_config.max_len)
             
@@ -533,7 +534,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
 
             # self._tb_log("text", {"0": decoded_text})
             self.writer.add_text(f"text/seq_len_{seq_lengths[i]}", decoded_text, self.current_epoch)
-
+        self.model.remove_cache()
         return texts
 
 
@@ -559,7 +560,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
         self.optimizer.load_state_dict(ckpt["optim"])
         self.scheduler.load_state_dict(ckpt["lr_scheduler"])
         self.beta_scheduler.load_state_dict(ckpt["beta_scheduler"])
-        self.current_epoch = ckpt["current_epoch"] + 1
+        self.current_epoch = ckpt["current_epoch"]
         self.best_loss = ckpt["best_loss"]
         self.patience_step = ckpt["patience_step"]
 
@@ -643,35 +644,36 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
             for epoch in range(self.training_config.num_epochs):
                 progress.reset(train_step_task)
                 progress.reset(val_step_task, start=False)
-                train_ce_loss, train_kl_loss = self._training_epoch(progress, train_step_task)
+                train_ce_loss, train_kl_loss, train_kl_loss_ind = self._training_epoch(progress, train_step_task)
                 progress.start_task(val_step_task)
-                val_ce_loss, val_kl_loss, metrics, mu_arr = self._validatin_epoch(progress, val_step_task)
+                torch.cuda.empty_cache()
+                val_ce_loss, val_kl_loss, val_kl_loss_ind, metrics, mu_arr = self._validatin_epoch(progress, val_step_task)
                 progress.update(
                     epoch_task,
                     advance=1,
-                    info=f'CE={val_ce_loss:.4f} KL={val_kl_loss:.4f} Perplexity={metrics["perplexity"]:.4f} \
+                    info=f'CE={val_ce_loss:.4f} KL={val_kl_loss:.4f} KL_I={val_kl_loss_ind:.4f} Perplexity={metrics["perplexity"]:.4f} \
 WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R={metrics["recall"]:.4f}'
                 )
                 self._inference()
                 
                 current_time = datetime.now()
                 current_time_str = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-                print(f"{current_time_str}. Epoch {self.current_epoch}\n\tTrain CE loss: {train_ce_loss}, Train KL loss: {train_kl_loss}\n")
-                print(f"Val CE loss: {val_ce_loss}, Val KL loss: {val_kl_loss}")
+                print(f"{current_time_str}. Epoch {self.current_epoch}\n\tTrain CE loss: {train_ce_loss:.4f}, Train KL loss: {train_kl_loss:.4f}, Train KL_I loss: {train_kl_loss_ind:.4f}\n")
+                print(f"Val CE loss: {val_ce_loss:.4f}, Val KL loss: {val_kl_loss:.4f}, Val KL_I loss: {val_kl_loss_ind:.4f}")
                 print(f'Perplexity: {metrics["perplexity"]:.3f}, WER: {metrics["wer"]:.3f}, WIP: {metrics["wip"]:.3f}, P: {metrics["precision"]:.3f}, R: {metrics["recall"]:.3f}')
                 mu_arr = torch.vstack(mu_arr).squeeze(dim=1)
                 print(f"Mu std: {mu_arr.std(dim=0).mean().item():.4f}, ||mu||: {mu_arr.norm(dim=-1).mean().item():.4f}") # std > 0.5 and norm > 3.5 after 10ep is ok
 
                 self.current_epoch += 1
 
-                if val_ce_loss + val_kl_loss < self.best_loss:
+                if val_ce_loss + val_kl_loss + val_kl_loss_ind < self.best_loss:
                     self._save_ckpt(os.path.join(f"{self.training_config.model_dir}", f'TransformerAnekdotGenerator_best.pt'))
-                    self.best_loss = val_ce_loss + val_kl_loss
+                    self.best_loss = val_ce_loss + val_kl_loss + val_kl_loss_ind
                 else:
                     self.patience_step += 1
                 self._save_ckpt(os.path.join(f"{self.training_config.model_dir}", f'TransformerAnekdotGenerator_last.pt'))
 
-                if self.early_stopping(val_ce_loss + val_kl_loss):
+                if self.early_stopping(val_ce_loss + val_kl_loss + val_kl_loss_ind):
                     print(f"Early stopping triggered.")
                     break
                 

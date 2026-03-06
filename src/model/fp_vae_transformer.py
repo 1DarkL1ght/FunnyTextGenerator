@@ -104,18 +104,18 @@ class FPVAETransformerDecoder(nn.Module):
         super().train(mode)
         self.training = True
 
-    def apply_word_dropout(self, x):
-        # Создаем маску: True для токенов, которые станут <UNK> (или 0)
-        mask = torch.rand(x.shape, device=x.device) < self.word_dropout_p
+    # def apply_word_dropout(self, x):
+    #     # Создаем маску: True для токенов, которые станут <UNK> (или 0)
+    #     mask = torch.rand(x.shape, device=x.device) < self.word_dropout_p
         
-        # Не трогаем спецтокены (PAD, BOS), если они важны
-        # Например, если PAD = 0, BOS = 1
-        non_special_mask = (x > 1) 
-        final_mask = mask & non_special_mask
+    #     # Не трогаем спецтокены (PAD, BOS), если они важны
+    #     # Например, если PAD = 0, BOS = 1
+    #     non_special_mask = (x > 1) 
+    #     final_mask = mask & non_special_mask
         
-        # Заменяем выбранные токены на ID токена <UNK> (например, 2)
-        x_dropped = x.masked_fill(final_mask, self.unk_id)
-        return x_dropped
+    #     # Заменяем выбранные токены на ID токена <UNK> (например, 2)
+    #     x_dropped = x.masked_fill(final_mask, self.unk_id)
+    #     return x_dropped
 
 
     def forward(
@@ -125,10 +125,7 @@ class FPVAETransformerDecoder(nn.Module):
         memory_key_padding_mask: torch.Tensor | None=None,
         full_tgt_mask: torch.Tensor | None=None,
     ) -> torch.Tensor:
-        if self.training:
-            out = self.embedding(self.apply_word_dropout(tgt))
-        else:
-            out = self.embedding(tgt)
+        out = self.embedding(tgt)
         out = self.pe(out)
         out = self.decoder(
             out,
@@ -177,7 +174,7 @@ class FPVAETransformerModel(nn.Module):
             latent_dim=latent_dim,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
-            num_layers=num_layers,
+            num_layers=num_layers // 2,
             dropout=dropout,
             vocab_size=vocab_size,
             max_len=max_len,
@@ -393,6 +390,18 @@ class FPVAETransformerModel(nn.Module):
     #             break
 
     #     return seqs
+
+    def setup_inference(self):
+        for layer in self.decoder.decoder.decoder_layers:
+            layer.setup_cache(
+                batch_size=1,
+                dtype=torch.float32,
+                max_seq_len=500,
+            )
+
+    def remove_cache(self):
+        for layer in self.decoder.decoder.decoder_layers:
+            layer.kv_cache = None
 
     # =========== Beam search ===========
     def forward_inference(

@@ -28,7 +28,7 @@ class VAEInferencer:
         ckpt = torch.load(ckpt_path, weights_only=False)
         self.model.load_state_dict(ckpt["model"])
         
-
+        self.model.setup_inference()
         
         self.tokenizer = CustomTokenizer(vocab_size=self.model_config.vocab_size)
         self.tokenizer.load("outputs/tokenizers/tokenizer.json")

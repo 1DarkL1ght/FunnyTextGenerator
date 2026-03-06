@@ -20,11 +20,18 @@ class VAELoss(nn.Module):
         self,
         mu: torch.Tensor,
         log_var: torch.Tensor,
-        lambda_: float=0.05,
     ) -> torch.Tensor:
-        
+        # default
         kl_per_element = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-        return torch.mean(torch.sum(kl_per_element, dim=-1))
+        kl_loss = torch.mean(torch.sum(kl_per_element, dim=-1))
+        return kl_loss, torch.tensor(0)
+
+        # from arxiv
+        # kl_loss_ind = torch.mean(torch.sum(-1 - log_var + log_var.exp(), dim=-1))
+        # mu_mean = mu.mean(dim=0)
+        # mu_log_var = mu_mean.var(dim=0).log()
+        # kl_loss = torch.sum(-0.5 * (1 + mu_log_var - mu_mean.pow(2) - mu_log_var.exp()), dim=0)
+        # return kl_loss, kl_loss_ind
 
 
     def __call__(
@@ -43,5 +50,5 @@ class VAELoss(nn.Module):
             gaussian_loss = torch.stack([self.gaussian_nll_criterion(mu[i], prior_mu[i], var[i]) for i in range(len(mu))]).mean()
             return ce_loss, gaussian_loss
         else:
-            kl_loss = self._kl_div_loss(mu, log_var)
-            return ce_loss, kl_loss
+            kl_loss, kl_loss_ind = self._kl_div_loss(mu, log_var)
+            return ce_loss, kl_loss, kl_loss_ind

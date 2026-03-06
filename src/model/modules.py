@@ -123,12 +123,6 @@ class TransformerEncoder(nn.Module):
         self.mu_layer = nn.Linear(d_model, latent_dim)
         self.log_var_layer = nn.Linear(d_model, latent_dim)
 
-        nn.init.xavier_normal_(self.mu_layer.weight)
-        nn.init.zeros_(self.mu_layer.bias)
-
-        nn.init.xavier_normal_(self.log_var_layer.weight)
-        nn.init.zeros_(self.log_var_layer.bias)
-
 
     def reparametrize(self,
                       mu_pyramid: list[torch.Tensor],
@@ -156,7 +150,7 @@ class TransformerEncoder(nn.Module):
         # self.feature_pyramid = []
         """
         TODO:
-        1. Move reparametrazie to before pyramid to decrease amout of computations
+        1. Move reparametrazie before pyramid to decrease amout of computations
         2. Different latent seq lengths for different scales of vectors
         """
         out = src
@@ -171,11 +165,11 @@ class TransformerEncoder(nn.Module):
         # for layer in self.encoder_layers:
         #     out = layer(out, src_key_padding_mask=src_key_padding_mask)
         out = self.encoder(out, src_key_padding_mask=src_key_padding_mask)
-        out = out.mean(dim=1).unsqueeze(1)
+        out = out.mean(dim=1)
         mu = self.mu_layer(out)
         log_var = self.log_var_layer(out)
         z = self.reparametrize(mu, log_var)
-        return mu, log_var, z
+        return mu, log_var, z.unsqueeze(1)
    
 
 class TransformerDecoderLayer(nn.Module):
@@ -199,12 +193,6 @@ class TransformerDecoderLayer(nn.Module):
                                                                k_proj=nn.Linear(d_model, d_model),
                                                                v_proj=nn.Linear(d_model, d_model),
                                                                output_proj=nn.Linear(d_model, d_model),
-                                                               kv_cache=modules.KVCache(batch_size=batch_size,
-                                                                                        max_seq_len=max_len,
-                                                                                        num_kv_heads=nhead,
-                                                                                        head_dim=d_model // nhead,
-                                                                                        dtype=torch.float32,
-                                                                                        ),
                                                                max_seq_len=max_len,
                                                                is_causal=True,
                                                                )
@@ -217,12 +205,6 @@ class TransformerDecoderLayer(nn.Module):
                                                                k_proj=nn.Linear(d_model, d_model),
                                                                v_proj=nn.Linear(d_model, d_model),
                                                                output_proj=nn.Linear(d_model, d_model),
-                                                               kv_cache=modules.KVCache(batch_size=batch_size,
-                                                                                        max_seq_len=max_len,
-                                                                                        num_kv_heads=nhead,
-                                                                                        head_dim=d_model // nhead,
-                                                                                        dtype=torch.float32,
-                                                                                        ),
                                                                max_seq_len=max_len,
                                                                is_causal=False,
                                                                )

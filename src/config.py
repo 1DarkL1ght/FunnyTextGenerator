@@ -46,9 +46,10 @@ class TrainingConfig:
                  train_tokenizer: bool=True,
                  warmup_steps: float=1.0,
                  grad_accumulation_steps: int=1,
-                 beta_max: float=1,
-                 beta_anneal_steps: int=50,
-                 beta_warmup_steps: int=20,
+                 beta_max_base: float=1,
+                 beta_anneal_cycle_length: float=2,
+                 beta_anneal_ramp_ratio: float=0.5,
+                 beta_anneal_warmup_cycles: int=2,
                  fp16: bool=True,
                  tsne: int=0,
                  seed: int=42,
@@ -75,9 +76,10 @@ class TrainingConfig:
         self.train_tokenizer = train_tokenizer
         self.warmup_steps = warmup_steps
         self.grad_accumulation_steps = grad_accumulation_steps
-        self.beta_max = beta_max
-        self.beta_anneal_steps = beta_anneal_steps
-        self.beta_warmup_steps = beta_warmup_steps
+        self.beta_max_base = beta_max_base
+        self.beta_anneal_cycle_length = beta_anneal_cycle_length
+        self.beta_anneal_ramp_ratio = beta_anneal_ramp_ratio
+        self.beta_anneal_warmup_cycles = beta_anneal_warmup_cycles
         self.fp16 = fp16
         self.tsne = tsne
         self.seed = seed
