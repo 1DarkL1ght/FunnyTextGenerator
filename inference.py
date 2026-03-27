@@ -28,7 +28,7 @@ class VAEInferencer:
         ckpt = torch.load(ckpt_path, weights_only=False)
         self.model.load_state_dict(ckpt["model"])
         
-        self.model.setup_inference()
+        # self.model.setup_inference("cuda:0")
         
         self.tokenizer = CustomTokenizer(vocab_size=self.model_config.vocab_size)
         self.tokenizer.load("outputs/tokenizers/tokenizer.json")
@@ -41,9 +41,9 @@ class VAEInferencer:
                                        dtype=torch.int32).tolist()
 
         for text_idx in range(self.batch_size):
-            noise = [torch.zeros(1,
-                                noise_lenghts[i],
-                                self.model_config.latent_dim).to(device) for i in range(self.model_config.num_layers)]
+            noise = torch.zeros(1,
+                                1,
+                                self.model_config.latent_dim).to(device)
             
             noise[0][0] = latent_space
             
@@ -58,7 +58,7 @@ class VAEInferencer:
                         self.tokenizer.unk_id,
                     ]
                 ).squeeze(0)
-            decoded_text = self.tokenizer.decode(text.tolist()).strip()
+            decoded_text = self.tokenizer.decode([text.tolist()])[0].strip()
             
             print(decoded_text)
             print("-----------------------")
@@ -79,7 +79,7 @@ def main(args_path: str):
     latent_space = torch.randn(config.latent_dim).to("cuda:0")
 
     inferencer = VAEInferencer(
-        ckpt_path=r"runs\0_99_metrics_shit_text\TransformerAnekdotGenerator_best.pt",
+        ckpt_path=r"outputs/models/TransformerAnekdotGenerator_best.pt",
         model_config=config,
         seq_len=150,
         batch_size=10,

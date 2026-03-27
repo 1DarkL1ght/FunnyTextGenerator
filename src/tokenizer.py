@@ -9,14 +9,15 @@ import pandas as pd
 class CustomTokenizer:
     def __init__(self, vocab_size: int = 10000):
         self.tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-        self.tokenizer.pre_tokenizer = ByteLevel()  # Предварительное разбиение по пробелам
+        self.tokenizer.pre_tokenizer = ByteLevel()
         self.tokenizer.decoder = decoders.ByteLevel()
         self.trainer = BpeTrainer(
-            vocab_size=vocab_size,  # Размер словаря
-            min_frequency=2,  # Игнорировать пары, встречающиеся реже 2 раз
-            special_tokens=["[PAD]", "[EOS]", "[UNK]"]
+            vocab_size=vocab_size,
+            min_frequency=2,
+            special_tokens=["[PAD]", "[EOS]", "[BOS]", "[UNK]"]
         )
         self.eos_id = None
+        self.bos_id = None
         self.pad_id = None
         self.unk_id = None
         self.mask_id = None
@@ -24,21 +25,23 @@ class CustomTokenizer:
     def load(self, path):
         self.tokenizer = Tokenizer.from_file(path)
         self.eos_id = self.tokenizer.token_to_id("[EOS]")
+        self.bos_id = self.tokenizer.token_to_id("[BOS]")
         self.pad_id = self.tokenizer.token_to_id("[PAD]")
         self.unk_id = self.tokenizer.token_to_id("[UNK]")
         self.tokenizer.post_processor = TemplateProcessing(
             single="$A [EOS]",
-            special_tokens=[("[EOS]", self.eos_id), ("[UNK]", self.unk_id), ("[PAD]", self.pad_id)]
+            special_tokens=[("[EOS]", self.eos_id), ("[BOS]", self.eos_id), ("[UNK]", self.unk_id), ("[PAD]", self.pad_id)]
         )
 
     def train(self, df):
         self.tokenizer.train_from_iterator(df['Text'], trainer=self.trainer)
         self.eos_id = self.tokenizer.token_to_id("[EOS]")
+        self.bos_id = self.tokenizer.token_to_id("[BOS]")
         self.pad_id = self.tokenizer.token_to_id("[PAD]")
         self.unk_id = self.tokenizer.token_to_id("[UNK]")
         self.tokenizer.post_processor = TemplateProcessing(
             single="$A [EOS]",
-            special_tokens=[("[EOS]", self.eos_id), ("[UNK]", self.unk_id), ("[PAD]", self.pad_id)]
+            special_tokens=[("[EOS]", self.eos_id), ("[BOS]", self.eos_id), ("[UNK]", self.unk_id), ("[PAD]", self.pad_id)]
         )
 
     def save(self, path: str):
@@ -48,7 +51,7 @@ class CustomTokenizer:
         return self.tokenizer.encode(text)
 
     def decode(self, tokens) -> str:
-        raw_str = self.tokenizer.decode(tokens)
+        raw_str = self.tokenizer.decode_batch(tokens)
         # raw_str = raw_str[raw_str.find("Ġ") + 1:].replace(" ", "").replace("Ġ", " ")
         return raw_str
 

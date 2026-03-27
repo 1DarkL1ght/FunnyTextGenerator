@@ -89,6 +89,7 @@ class FPVAETransformerDecoder(nn.Module):
             d_model=d_model,
             latent_dim=latent_dim,
             num_layers=num_layers,
+            layer_norm_eps=layer_norm_eps,
         )
         self.fc = nn.Linear(d_model, vocab_size)
 
@@ -123,7 +124,9 @@ class FPVAETransformerDecoder(nn.Module):
         tgt: torch.Tensor,
         memory: list[torch.Tensor],
         memory_key_padding_mask: torch.Tensor | None=None,
-        full_tgt_mask: torch.Tensor | None=None,
+        tgt_causal_mask: torch.Tensor | None=None,
+        tgt_key_padding_mask: torch.Tensor | None=None,
+        tgt_dropout_mask: torch.Tensor | None=None,
     ) -> torch.Tensor:
         out = self.embedding(tgt)
         out = self.pe(out)
@@ -131,7 +134,9 @@ class FPVAETransformerDecoder(nn.Module):
             out,
             memory,
             memory_key_padding_mask=memory_key_padding_mask,
-            full_tgt_mask=full_tgt_mask,
+            tgt_causal_mask=tgt_causal_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            tgt_dropout_mask=tgt_dropout_mask,
         )
         return self.fc(out)
     
@@ -174,7 +179,7 @@ class FPVAETransformerModel(nn.Module):
             latent_dim=latent_dim,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
-            num_layers=num_layers // 2,
+            num_layers=num_layers,
             dropout=dropout,
             vocab_size=vocab_size,
             max_len=max_len,
@@ -196,24 +201,28 @@ class FPVAETransformerModel(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        eos_id: int=1,
+        bos_id: int=1,
         src_key_padding_mask: torch.Tensor | None=None,
-        full_tgt_mask: torch.Tensor | None=None,
+        tgt_causal_mask: torch.Tensor | None=None,
+        tgt_key_padding_mask: torch.Tensor | None=None,
+        tgt_dropout_mask: torch.Tensor | None=None,
     ) -> tuple[
         list[torch.Tensor],
         list[torch.Tensor],
         list[torch.Tensor],
     ]:
         batch_size = src.shape[0]
-        shift = torch.tensor([eos_id] * batch_size, dtype=torch.long).unsqueeze(1).to(src.device)
-        shifted_src = torch.cat([shift, src], dim=-1)
+        shift = torch.tensor([bos_id] * batch_size, dtype=torch.long).unsqueeze(1).to(src.device)
+        shifted_src = torch.cat([shift, src[:, :-1]], dim=-1)
         mu, log_var, z = self.encoder(src, src_key_padding_mask=src_key_padding_mask)
         out = self.decoder(
             shifted_src,
             z,
-            memory_key_padding_mask=None, # src_key_padding_mask
-            full_tgt_mask=full_tgt_mask,
-        )[:, :-1]
+            memory_key_padding_mask=None,
+            tgt_causal_mask=tgt_causal_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            tgt_dropout_mask=tgt_dropout_mask,
+        )
         
         return mu, log_var, out
 
@@ -391,13 +400,21 @@ class FPVAETransformerModel(nn.Module):
 
     #     return seqs
 
-    def setup_inference(self):
+    def setup_inference(self, device):
         for layer in self.decoder.decoder.decoder_layers:
-            layer.setup_cache(
+            layer.self_attention_layer.setup_cache(
                 batch_size=1,
                 dtype=torch.float32,
                 max_seq_len=500,
             )
+            layer.self_attention_layer.kv_cache.to(device)
+            
+            layer.cross_attention_layer.setup_cache(
+                batch_size=1,
+                dtype=torch.float32,
+                max_seq_len=500,
+            )
+            layer.cross_attention_layer.kv_cache.to(device)
 
     def remove_cache(self):
         for layer in self.decoder.decoder.decoder_layers:
@@ -408,6 +425,7 @@ class FPVAETransformerModel(nn.Module):
         self,
         noise,
         eos_id,
+        bos_id,
         forbidden_ids: list[int],
         beam_size=5,
         max_len=200,
@@ -421,16 +439,16 @@ class FPVAETransformerModel(nn.Module):
 
         # beams[b] = list of dicts {'seq', 'logprob'}
         beams = [[{
-            'seq': torch.tensor([eos_id], device=device, dtype=torch.long),
+            'seq': torch.tensor([bos_id], device=device, dtype=torch.long),
             'logprob': 0.0
         }] for _ in range(batch_size)]
 
         finished = [[] for _ in range(batch_size)]
 
         # reset KV-cache
-        for layer in self.decoder.decoder.decoder_layers:
-            layer.self_attention_layer.reset_cache()
-            layer.cross_attention_layer.reset_cache()
+        # for layer in self.decoder.decoder.decoder_layers:
+        #     layer.self_attention_layer.reset_cache()
+        #     layer.cross_attention_layer.reset_cache()
 
         for _ in range(max_len):
             new_beams = [[] for _ in range(batch_size)]

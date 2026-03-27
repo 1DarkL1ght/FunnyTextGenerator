@@ -20,7 +20,7 @@ from src.config import ModelConfig, TrainingConfig
 from src.model.fp_vae_transformer import FPVAETransformerModel
 from src.dataset import TextDataset
 from src.tokenizer import CustomTokenizer
-from src.utils import EarlyStopping, create_padding_mask
+from src.utils import EarlyStopping, create_padding_mask, create_tgt_padding_mask
 from src.metrics import Precision, Recall, Metrics
 from torchmetrics.classification import MulticlassPrecision, MulticlassRecall
 from src.beta_scheduler import BetaScheduler, CyclicBetaScheduler
@@ -111,17 +111,17 @@ class Trainer:
                                                          self.training_config.warmup_steps * len(self.trainloader),
                                                          self.training_config.num_epochs * len(self.trainloader))
         
-        # self.beta_scheduler = BetaScheduler(
-        #     beta_max=self.training_config.beta_max,
-        #     beta_anneal_steps=self.training_config.beta_anneal_steps * self.train_epoch_len,
-        #     beta_warmup_steps=self.training_config.beta_warmup_steps * self.train_epoch_len,
-        #     )
-        self.beta_scheduler = CyclicBetaScheduler(
-            cycle_length=self.train_epoch_len * self.training_config.beta_anneal_cycle_length,
-            beta_max_base=self.training_config.beta_max_base,
-            ratio=self.training_config.beta_anneal_ramp_ratio,
-            warmup_cycles=self.training_config.beta_anneal_warmup_cycles,
-        )
+        self.beta_scheduler = BetaScheduler(
+            beta_max=self.training_config.beta_max,
+            beta_anneal_steps=self.training_config.beta_anneal_steps * self.train_epoch_len,
+            beta_warmup_steps=self.training_config.beta_warmup_steps * self.train_epoch_len,
+            )
+        # self.beta_scheduler = CyclicBetaScheduler(
+        #     cycle_length=self.train_epoch_len * self.training_config.beta_anneal_cycle_length,
+        #     beta_max_base=self.training_config.beta_max_base,
+        #     ratio=self.training_config.beta_anneal_ramp_ratio,
+        #     warmup_cycles=self.training_config.beta_anneal_warmup_cycles,
+        # )
 
         self.scheduler.step()
 
@@ -181,6 +181,13 @@ class Trainer:
         for layer in self.model.children():
             if hasattr(layer, 'reset_parameters'):
                 layer.reset_parameters()
+
+        # def init_weights(module):
+        #     if isinstance(module, (nn.Linear, nn.Embedding)):
+        #         module.weight.data.normal_(mean=0.0, std=0.02)
+        #         if isinstance(module, nn.Linear) and module.bias is not None:
+        #             module.bias.data.zero_()
+        # self.model.apply(init_weights)
         
         optims: dict[str, torch.optim.Optimizer] = {
             "RAdam": torch.optim.RAdam,
@@ -247,18 +254,31 @@ class Trainer:
     def _tb_log(self, main_tag: str, kwargs: dict[str, float]):
         step = self.current_epoch
 
-        if main_tag == "lr":
+        if main_tag == "lr" or main_tag == "beta":
             step = self.training_step
 
         for tag, value in kwargs.items():
             self.writer.add_scalar(f"{main_tag}/{tag}", value, step)
 
-    def tgt_dropout_mask(self):
-        dropout_mask = torch.rand(
-            self.training_config.max_len+1,
-            self.training_config.max_len+1,
-            device=self.training_config.device,
-        ) < self.training_config.word_dropout
+    def create_tgt_dropout_mask(self, bs: int):
+        if self.model.training and self.training_config.word_dropout > 0:
+            dropout_mask = torch.rand(
+                bs,
+                1,
+                self.training_config.max_len,
+                device=self.training_config.device,
+            ).expand(
+                bs,
+                self.training_config.max_len,
+                self.training_config.max_len,
+            ) > self.training_config.word_dropout
+        else:
+            dropout_mask = torch.ones(
+                bs,
+                self.training_config.max_len,
+                self.training_config.max_len,
+                device=self.training_config.device,
+            ).bool()
         return dropout_mask
 
     def _forward_pass(self, batch: torch.Tensor) -> tuple[tuple[torch.Tensor,
@@ -266,41 +286,44 @@ class Trainer:
                                                                 torch.Tensor],
                                                           torch.Tensor,
                                                           torch.Tensor]:
-        src_key_padding_mask = create_padding_mask(batch, padding_value=self.tokenizer.pad_id).to(self.training_config.device)
-        # src_key_padding_mask = src_key_padding_mask[:, None, :].to(torch.float)
-        # src_key_padding_mask = src_key_padding_mask.masked_fill(src_key_padding_mask.bool(), float("-inf"))
+        # Unmasked: True
+        # Masked: False
+        src_key_padding_mask = create_padding_mask(batch, padding_value=self.tokenizer.pad_id).to(self.training_config.device) # [BS, S]
+        tgt_causal_mask = nn.Transformer.generate_square_subsequent_mask(
+            sz=self.training_config.max_len,
+            device=self.training_config.device,
+        ).unsqueeze(0).expand(
+            src_key_padding_mask.shape[0],
+            self.training_config.max_len,
+            self.training_config.max_len,
+        ) == 0 # [BS, S, S]
+        tgt_key_padding_mask = create_tgt_padding_mask(batch, padding_value=self.tokenizer.pad_id) # [BS, S, S]
 
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(sz=self.training_config.max_len+1, device=self.training_config.device).unsqueeze(0).expand(src_key_padding_mask.shape[0],
-                                                                                                                                                             self.training_config.max_len+1,
-                                                                                                                                                             self.training_config.max_len+1,
-                                                                                                                                                             )
-        tgt_key_padding_mask = torch.cat([torch.zeros(batch.shape[0], 1).to(self.training_config.device), src_key_padding_mask], dim=-1)
-        tgt_key_padding_mask = tgt_key_padding_mask[:, None, :].to(torch.float)  # [B, 1, T]
-        tgt_key_padding_mask = tgt_key_padding_mask.masked_fill(tgt_key_padding_mask.bool(), float("-inf"))  # [B,1,T]
-
-        if self.model.training and self.training_config.word_dropout > 0:
-            tgt_mask = tgt_mask.masked_fill(self.tgt_dropout_mask(), float("-inf"))
-
-        full_tgt_mask = tgt_mask + tgt_key_padding_mask
-
+        tgt_dropout_mask = self.create_tgt_dropout_mask(bs=batch.shape[0]) # [BS, S, S]
         if self.training_config.fp16:
             with autocast(device_type=self.training_config.device, dtype=torch.float16):
-                model_output = self.model(batch,
-                                          self.tokenizer.eos_id,
-                                          src_key_padding_mask=src_key_padding_mask,
-                                          full_tgt_mask=full_tgt_mask,
-                                          )
+                model_output = self.model(
+                    batch,
+                    self.tokenizer.bos_id,
+                    src_key_padding_mask=src_key_padding_mask,
+                    tgt_causal_mask=tgt_causal_mask,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    tgt_dropout_mask=tgt_dropout_mask,
+                )
                 # ce_loss, kl__loss = self._loss_fn(*model_output, batch)
                 ce_loss, kl_loss, kl_loss_ind = self.loss(*model_output, batch)
 
                 # if self.training_config.teacher is not None:
                 #     teacher_output
         else:
-            model_output = self.model(batch,
-                                          self.tokenizer.eos_id,
-                                          src_key_padding_mask=src_key_padding_mask,
-                                          full_tgt_mask=full_tgt_mask,
-                                          )
+            model_output = self.model(
+                batch,
+                self.tokenizer.bos_id,
+                src_key_padding_mask=src_key_padding_mask,
+                tgt_causal_mask=tgt_causal_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                tgt_dropout_mask=tgt_dropout_mask,
+            )
             # ce_loss, kl_loss = self._loss_fn(*model_output, batch)
             ce_loss, kl_loss, kl_loss_ind = self.loss(*model_output, batch)
 
@@ -367,8 +390,8 @@ class Trainer:
         input: torch.Tensor,
         target: torch.Tensor,
     ) -> None:
-        decoded_pred_texts = [self.tokenizer.decode(self._cut_at_eos(out_seq)) for out_seq in input.argmax(dim=-1)]
-        decoded_target_texts = [self.tokenizer.decode(self._cut_at_eos(out_seq)) for out_seq in target]
+        decoded_pred_texts = self.tokenizer.decode(input.argmax(dim=-1).tolist())
+        decoded_target_texts = self.tokenizer.decode(target.tolist())
 
         self.perplexity.update(input, target)
         self.precision.update(input.transpose(2, 1), target)
@@ -409,10 +432,11 @@ class Trainer:
         return model_output, ce_loss, kl_loss, kl_loss_ind
 
 
-    def _training_epoch(self,
-                        progress: Progress,
-                        step_task,
-                        ) -> tuple[float, float]:
+    def _training_epoch(
+        self,
+        progress: Progress,
+        step_task,
+    ) -> tuple[float, float]:
         self.model.train()
 
         local_training_step = 0
@@ -445,14 +469,16 @@ class Trainer:
         return running_ce_loss, running_kl_loss, running_kl_loss_ind
 
 
-    def _validatin_epoch(self,
-                         progress: Progress,
-                         step_task,
-                         ) -> tuple [float,
-                                     float,
-                                     dict[str, float],
-                                     list[torch.Tensor],
-                                     ]:
+    def _validatin_epoch(
+        self,
+        progress: Progress,
+        step_task,
+    ) -> tuple [
+        float,
+        float,
+        dict[str, float],
+        list[torch.Tensor],
+    ]:
         self.model.eval()
         self._reset_metrics()
 
@@ -511,7 +537,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
         texts = []
 
         seq_lengths = torch.linspace(1, self.training_config.max_len, self.training_config.inference_size, dtype=torch.int32)
-        self.model.setup_inference()
+        # self.model.setup_inference(device=self.training_config.device)
         for i in range(self.training_config.inference_size):
             # rand_seq_len = random.randint(20, self.training_config.max_len)
             
@@ -525,16 +551,16 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
             #                      self.model_config.latent_dim).to(self.training_config.device) for i in range(self.model_config.num_layers)]
             noise = torch.randn(1, 1, self.model_config.latent_dim).to(self.training_config.device)
             with torch.no_grad():
-                text = self.model.forward_inference(noise, self.tokenizer.eos_id, max_len=self.training_config.max_len, forbidden_ids=[
+                text = self.model.forward_inference(noise, self.tokenizer.eos_id, self.tokenizer.bos_id, max_len=self.training_config.max_len, forbidden_ids=[ # bos_id
                         self.tokenizer.pad_id,
                         self.tokenizer.unk_id,
                     ]).squeeze(0)
-            decoded_text = self.tokenizer.decode(text.tolist()).strip()
+            decoded_text = self.tokenizer.decode([text.tolist()])[0].strip()
             texts.append(decoded_text)
 
             # self._tb_log("text", {"0": decoded_text})
             self.writer.add_text(f"text/seq_len_{seq_lengths[i]}", decoded_text, self.current_epoch)
-        self.model.remove_cache()
+        # self.model.remove_cache()
         return texts
 
 
@@ -648,6 +674,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
                 progress.start_task(val_step_task)
                 torch.cuda.empty_cache()
                 val_ce_loss, val_kl_loss, val_kl_loss_ind, metrics, mu_arr = self._validatin_epoch(progress, val_step_task)
+                torch.cuda.empty_cache()
                 progress.update(
                     epoch_task,
                     advance=1,
@@ -658,7 +685,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
                 
                 current_time = datetime.now()
                 current_time_str = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-                print(f"{current_time_str}. Epoch {self.current_epoch}\n\tTrain CE loss: {train_ce_loss:.4f}, Train KL loss: {train_kl_loss:.4f}, Train KL_I loss: {train_kl_loss_ind:.4f}\n")
+                print(f"{current_time_str}. Epoch {self.current_epoch}\nTrain CE loss: {train_ce_loss:.4f}, Train KL loss: {train_kl_loss:.4f}, Train KL_I loss: {train_kl_loss_ind:.4f}")
                 print(f"Val CE loss: {val_ce_loss:.4f}, Val KL loss: {val_kl_loss:.4f}, Val KL_I loss: {val_kl_loss_ind:.4f}")
                 print(f'Perplexity: {metrics["perplexity"]:.3f}, WER: {metrics["wer"]:.3f}, WIP: {metrics["wip"]:.3f}, P: {metrics["precision"]:.3f}, R: {metrics["recall"]:.3f}')
                 mu_arr = torch.vstack(mu_arr).squeeze(dim=1)
@@ -673,7 +700,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f} P={metrics["precision"]:.4f} R
                     self.patience_step += 1
                 self._save_ckpt(os.path.join(f"{self.training_config.model_dir}", f'TransformerAnekdotGenerator_last.pt'))
 
-                if self.early_stopping(val_ce_loss + val_kl_loss + val_kl_loss_ind):
+                if self.early_stopping(val_ce_loss):
                     print(f"Early stopping triggered.")
                     break
                 

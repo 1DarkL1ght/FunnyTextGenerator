@@ -11,7 +11,7 @@ class VAELoss(nn.Module):
     ):
         super().__init__()
         self.device = device
-        self.ce_criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, label_smoothing=0.1).to(self.device)
+        self.ce_criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, label_smoothing=0.1).to(self.device) # maybe reduction sum + /batch_size, beta = 0.5 -- 1
         self.gaussian_nll_criterion = nn.GaussianNLLLoss(full=True).to(self.device)
         self.use_gaussian_nll = use_gaussian_nll
 

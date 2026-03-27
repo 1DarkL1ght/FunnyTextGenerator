@@ -223,12 +223,15 @@ class TransformerDecoderLayer(nn.Module):
         self.layer_norm_3 = nn.LayerNorm(eps=layer_norm_eps, normalized_shape=d_model)
 
 
-    def forward(self,
-                tgt: torch.Tensor,
-                memory: list[torch.Tensor],
-                memory_key_padding_mask: torch.Tensor | None=None,
-                full_tgt_mask: torch.Tensor | None=None,
-                ) -> torch.Tensor:
+    def forward(
+        self,
+        tgt: torch.Tensor,
+        memory: list[torch.Tensor],
+        memory_key_padding_mask: torch.Tensor | None=None,
+        tgt_causal_mask: torch.Tensor | None=None,
+        tgt_key_padding_mask: torch.Tensor | None=None,
+        tgt_dropout_mask: torch.Tensor | None=None,
+    ) -> torch.Tensor:
         """
         CHECK MASKS!
         """
@@ -244,16 +247,21 @@ class TransformerDecoderLayer(nn.Module):
         #                                        dtype=torch.float32,
         #                                        max_seq_len=self.max_len,
         #                                        )
-
-        self_attn_out = self.self_attention_layer(x=tgt,
-                                                  y=tgt,
-                                                  mask=full_tgt_mask,
-                                                  )
+        
+        self_attn_mask = None
+        if tgt_causal_mask is not None and tgt_key_padding_mask is not None and tgt_dropout_mask is not None:
+            self_attn_mask = tgt_causal_mask & tgt_key_padding_mask & tgt_dropout_mask
+        self_attn_out = self.self_attention_layer(
+            x=tgt,
+            y=tgt,
+            mask=self_attn_mask,
+        )
         skip_connection_output = self.layer_norm_1(self_attn_out + tgt)
-        cross_attn_output = self.cross_attention_layer(x=skip_connection_output,
-                                                       y=memory,
-                                                       mask=memory_key_padding_mask,
-                                                       )
+        cross_attn_output = self.cross_attention_layer(
+            x=skip_connection_output,
+            y=memory,
+            mask=memory_key_padding_mask,
+        )
         skip_connection_output = self.layer_norm_2(cross_attn_output + skip_connection_output)
         feedforward_output = self.feed_forward(skip_connection_output)
         skip_connection_output = self.layer_norm_3(feedforward_output + skip_connection_output)
@@ -270,27 +278,33 @@ class TransformerDecoder(nn.Module):
                  d_model: int,
                  latent_dim: int,
                  num_layers: int,
+                 layer_norm_eps: float=0.00001
                  ):
         super().__init__()
         self.num_layers = num_layers
         self.decoder_layers = nn.ModuleList([decoder_layer for _ in range(num_layers)])
         self.upscale_layers = nn.ModuleList([nn.Linear(latent_dim, d_model) for _ in range(num_layers)])
+        self.ln_z_layers = nn.ModuleList([nn.LayerNorm(eps=layer_norm_eps, normalized_shape=d_model) for _ in range(num_layers)])
 
 
-    def forward(self,
-                tgt: torch.Tensor, 
-                memory: list[torch.Tensor],
-                memory_key_padding_mask: torch.Tensor | None=None,
-                full_tgt_mask: torch.Tensor | None=None,
-                ) -> torch.Tensor:
+    def forward(
+        self,
+        tgt: torch.Tensor, 
+        memory: list[torch.Tensor],
+        memory_key_padding_mask: torch.Tensor | None=None,
+        tgt_causal_mask: torch.Tensor | None=None,
+        tgt_key_padding_mask: torch.Tensor | None=None,
+        tgt_dropout_mask: torch.Tensor | None=None,
+    ) -> torch.Tensor:
         out = tgt
-        upscaled_memory = [self.upscale_layers[i](memory) for i in range(self.num_layers)]
+        upscaled_memory = [self.ln_z_layers[i](self.upscale_layers[i](memory)) for i in range(self.num_layers)]
         for i, layer in enumerate(self.decoder_layers):
-            out = layer(out,
-                        upscaled_memory[i],
-                        memory_key_padding_mask=memory_key_padding_mask,
-                        full_tgt_mask=full_tgt_mask,
-                        )
-
+            out = layer(
+                out,
+                upscaled_memory[i],
+                memory_key_padding_mask=memory_key_padding_mask,
+                tgt_causal_mask=tgt_causal_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                tgt_dropout_mask=tgt_dropout_mask,
+            )
         return out
-    
