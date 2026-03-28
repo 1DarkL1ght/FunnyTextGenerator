@@ -2,57 +2,34 @@ data_path: data/concatenated_anekdot_dataset.csv
 train_batch_size: 32
 val_batch_size: 64
 train_size: 0.8
-epochs: 200
-lr: 2e-4
+epochs: 5
+lr1: 2e-4
+lr2: 2e-5
 weight_decay: 0.05
 fp16: True
-d_model: 1024
-nhead: 16
-dim_feedforward: 2048
-reduction: sum # deprecated
-num_layers: 12
-vocab_size: 50000
 max_len: 150
 model_dir: outputs/models
 optim: AdamW
 device: cuda
-patience: 150
+patience: 5
 inference_size: 4
-train_tokenizer: False
-tokenizer_path: outputs/tokenizers/tokenizer.json
 seed: 42
-dropout: 0.1
-word_dropout: 0
-mask_p: 0.0 # deprecated
-latent_dim: 512 # 256-512 # 128
+latent_dim: 512
 tsne: 1024
 grad_accumulation_steps: 4
-warmup_steps: 5 # in epochs # 0.3 # 10
-beta_max: 0.0025 # try 0.0025 / 3
-beta_anneal_steps: 15 # in epochs
-beta_warmup_steps: 0 # in epochs
-# beta_max_base: 0.0025 # 0.01
-# beta_anneal_cycle_length: 10
-# beta_anneal_ramp_ratio: 0.5
-# beta_anneal_warmup_cycles: 2
-gaussian_nll: False
+warmup_steps: 1 # in epochs
+beta_max: 0.01
+beta_anneal_steps: 1 # in epochs
+scheduler_type: linear
+encoder_name: ai-forever/ruBert-large
+decoder_name: ai-forever/rugpt3small_based_on_gpt2
+lora: True
+lora_modules:
+ - c_attn
+ - c_proj
+ - c_fc
 
-resume: outputs/models/TransformerAnekdotGenerator_last.pt
+# resume: outputs/models/TransformerAnekdotGenerator_last.pt
 
 # @TODO: REFACTOR ALL!!!
-# План экспериментов:
-# 1. линейный beta annealing 15 эпох warmup для него -
-# 2. уменьшить word dropout до 0.2 +
-# 3. nhead 8 +-
-# 4. Сравнять количество слоев в энкодере и декодере +
-# 5. Увеличить beta_max до 0.05, 0.1, 0.2 ???
-# 6. Увеличить latent_dim до 256-512 + 
-# 7. warmup 5 ep +
-# 8. Увеличить модель (d_model + num_layers) +
-# ---
-# lr 1e-4 (при увеличении модели, после первого эксперимента по увеличению) -
-# beta_max_base 0.005 ~
-# эффективный batch size 256-512 (при увеличении модели, после первого эксперимента по увеличению)
-# cosine decay with warmup для lr (потестить, в конце)
-# ---
-# Decoder-only VAE? (latent vector as first token before [BOS])
+# LoRA maybe (peft) !!! 

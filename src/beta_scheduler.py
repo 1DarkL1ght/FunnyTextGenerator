@@ -1,4 +1,18 @@
 class BetaScheduler:
+    def __init__(self):
+        self.beta_curr = 0
+
+    def step(self) -> float:
+        raise NotImplementedError
+
+    def state_dict(self) -> dict[str, int | float]:
+        raise NotImplementedError
+
+    def load_state_dict(self, state_dict: dict[str, int | float]) -> None:
+        raise NotImplementedError
+
+
+class LinearBetaScheduler(BetaScheduler):
     def __init__(self, beta_anneal_steps: int, beta_warmup_steps: int=0, beta_max: float=1):
         self.beta_anneal_steps = beta_anneal_steps
         self.beta_max = beta_max
@@ -30,7 +44,7 @@ class BetaScheduler:
         self.beta_curr = min(self.beta_max, max(0, self.beta_max * (self.current_step - self.beta_warmup_steps) / self.beta_anneal_steps))
         return self.beta_curr
 
-class CyclicBetaScheduler:
+class CyclicBetaScheduler(BetaScheduler):
     def __init__(
         self,
         cycle_length: int, # steps

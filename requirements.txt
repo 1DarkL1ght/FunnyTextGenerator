@@ -13,3 +13,4 @@ torchao
 torcheval
 rich
 torchmetrics
+peft

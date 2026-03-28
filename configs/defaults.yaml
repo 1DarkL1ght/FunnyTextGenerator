@@ -1,0 +1,45 @@
+data_path: data/concatenated_anekdot_dataset.csv
+train_batch_size: 32
+val_batch_size: 64
+train_size: 0.8
+epochs: 200
+lr1: 2e-4
+lr2: 2e-5
+weight_decay: 0.05
+fp16: True
+d_model: 1024
+nhead: 16
+dim_feedforward: 2048
+reduction: sum # deprecated
+num_layers: 12
+vocab_size: 50000
+max_len: 150
+model_dir: outputs/models
+optim: AdamW
+device: cuda
+patience: 150
+inference_size: 4
+train_tokenizer: False
+tokenizer_path: outputs/tokenizers/tokenizer.json
+seed: 42
+dropout: 0.1
+word_dropout: 0
+mask_p: 0.0 # deprecated
+latent_dim: 512
+tsne: 1024
+grad_accumulation_steps: 4
+warmup_steps: 5 # in epochs
+beta_max: 0.0025
+beta_anneal_steps: 15 # in epochs
+beta_warmup_steps: 0 # in epochs
+beta_max_base: 0.0025
+beta_anneal_cycle_length: 10
+beta_anneal_ramp_ratio: 0.5
+beta_anneal_warmup_cycles: 2
+scheduler_type: linear
+lora: False
+lora_modules:
+ - "c_attn"
+resume: ""
+encoder_name: ai-forever/ruBert-large
+decoder_name: ai-forever/rugpt3small_based_on_gpt2
