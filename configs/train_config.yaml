@@ -1,4 +1,4 @@
-data_path: data/concatenated_anekdot_dataset.csv
+data_path: data/concatenated_anekdot_dataset_v2_1_2M.csv
 train_batch_size: 32
 val_batch_size: 64
 train_size: 0.8
@@ -21,15 +21,29 @@ warmup_steps: 1 # in epochs
 beta_max: 0.01
 beta_anneal_steps: 1 # in epochs
 scheduler_type: linear
+word_dropout: 0.3
+workers: 3
 encoder_name: ai-forever/ruBert-large
 decoder_name: ai-forever/rugpt3small_based_on_gpt2
 lora: True
 lora_modules:
- - c_attn
- - c_proj
- - c_fc
+  - c_attn
+
 
 # resume: outputs/models/TransformerAnekdotGenerator_last.pt
 
 # @TODO: REFACTOR ALL!!!
-# LoRA maybe (peft) !!! 
+
+# Maybe L = CE + beta * KL + gamma / KL, gamma | target KL ~20 (?)
+# beta 0.1, увеличить gamma | target KL ~20 (?)
+# word dropout
+# подавать z через past_key_values
+# word dropout со случайным токеном
+# word dropout с заменой случайных wte на нулевые вектора
+# attention dropout
+# z = z + eps, eps ~ N(0, s**2) и плавно уменьшать s до 0
+# несколько шагов энкодер + маппинг перед обучением декодера
+# max(lambda, KL), lambda = dim(z) * (0.1 -- 0.5)
+# копировать z несколько раз чтобы усилить сигнал
+# z -> MLP -> (z1, z2, ..., zn (5 -- 10)) разделяя смысл z на несколько эмбеддингов
+# VAMPPrior

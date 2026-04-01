@@ -5,7 +5,7 @@ from torch import nn
 class VAELoss(nn.Module):
     def __init__(
         self,
-        ignore_index: int=0,
+        ignore_index: int=-100,
         device: str="cuda",
     ):
         super().__init__()

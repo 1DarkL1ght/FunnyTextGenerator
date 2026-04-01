@@ -12,6 +12,8 @@ class MappingEncoder(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(d_model, d_model)
         self.act = nn.SiLU()
+        self.fc2 = nn.Linear(d_model, d_model)
+        self.drop = nn.Dropout(0.2)
         self.mu_layer = nn.Linear(d_model, latent_dim)
         self.log_var_layer = nn.Linear(d_model, latent_dim)
 
@@ -22,7 +24,8 @@ class MappingEncoder(nn.Module):
         return z
 
     def forward(self, x: torch.Tensor):
-        out = self.act(self.fc1(x))
+        out = self.drop(self.act(self.fc1(x)))
+        out = self.act(self.fc2(out))
         mu = self.mu_layer(out)
         log_var = self.log_var_layer(out)
         z = self.reparametrize(mu, log_var)
@@ -62,17 +65,19 @@ class PretrainedNetwork(nn.Module):
         self.top_k = top_k
         self.temperature = temperature
 
+        # self.kl_coef = nn.Parameter(torch.tensor(0.0))
+
         self.encoder = AutoModel.from_pretrained(encoder_name)
-        for param in self.encoder.parameters():
-            param.requires_grad = False
+        # for param in self.encoder.parameters():
+        #     param.requires_grad = False
 
         self.decoder = AutoModelForCausalLM.from_pretrained(decoder_name)
         if lora:
             from peft import LoraConfig, get_peft_model
             lora_config = LoraConfig(
-                r=16,                # Ранг адаптации (8-32 обычно достаточно)
-                lora_alpha=32,       # Коэффициент масштабирования
-                target_modules=lora_modules, # Целевые слои в ruGPT3 (Attention)
+                r=16,
+                lora_alpha=32,
+                target_modules=lora_modules,
                 lora_dropout=0.05,
                 bias="none",
                 task_type="CAUSAL_LM",

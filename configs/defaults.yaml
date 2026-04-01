@@ -37,6 +37,7 @@ beta_anneal_cycle_length: 10
 beta_anneal_ramp_ratio: 0.5
 beta_anneal_warmup_cycles: 2
 scheduler_type: linear
+workers: 3
 lora: False
 lora_modules:
  - "c_attn"

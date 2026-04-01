@@ -25,6 +25,7 @@ from src.metrics import Precision, Recall
 from torchmetrics.classification import MulticlassPrecision, MulticlassRecall
 from src.beta_scheduler import BetaScheduler, LinearBetaScheduler, CyclicBetaScheduler
 from src.loss import VAELoss
+from src.lr_scheduler import custom_lr_scheduler
 
 # @TODO Distillation
 # @TODO Code refactor
@@ -76,7 +77,7 @@ class Trainer:
 
     def _setup_loss(self) -> None:
         self.loss = VAELoss(
-            ignore_index=self.model.decoder.config.pad_token_id,
+            ignore_index=-100,
             device=self.config.device,
         )
 
@@ -100,12 +101,19 @@ class Trainer:
 
 
     def _get_schedulers(self) -> None:
-        self.scheduler = get_linear_schedule_with_warmup(
+        # self.scheduler = get_linear_schedule_with_warmup(
+        #     self.optimizer,
+        #     self.config.warmup_steps * len(self.trainloader),
+        #     self.config.epochs * len(self.trainloader),
+        # )
+        self.scheduler = custom_lr_scheduler(
             self.optimizer,
             self.config.warmup_steps * len(self.trainloader),
             self.config.epochs * len(self.trainloader),
+            self.config.lr1,
+            self.config.lr2,
         )
-        
+
         if self.config.scheduler_type == "linear":
             self.beta_scheduler = LinearBetaScheduler(
                 beta_max=self.config.beta_max,
@@ -120,7 +128,6 @@ class Trainer:
                 warmup_cycles=self.config.beta_anneal_warmup_cycles,
             )
 
-        self.scheduler.step()
 
 
     def _get_dataloaders(self) -> tuple[int, int]:
@@ -135,14 +142,14 @@ class Trainer:
             batch_size=self.config.train_batch_size,
             shuffle=True,
             pin_memory=True,
-            num_workers=0,
+            num_workers=self.config.workers,
         )
         self.valloader = DataLoader(
             valset,
             batch_size=self.config.val_batch_size,
             shuffle=True,
             pin_memory=True,
-            num_workers=0,
+            num_workers=self.config.workers,
         )
 
         train_texts = len(trainset)
@@ -168,6 +175,7 @@ class Trainer:
             top_k=50,
             temperature=0.8,
             lora=self.config.lora,
+            lora_modules=self.config.lora_modules,
         ).to(self.config.device)
 
         optims: dict[str, torch.optim.Optimizer] = {
@@ -195,7 +203,7 @@ class Trainer:
             [
                 {
                     "params": mapping_params,
-                    "lr": self.config.lr1,
+                    "lr": self.config.lr2, # lr1 if default scheduler
                     "weight_decay": self.config.weight_decay,
                 },
                 {
@@ -210,11 +218,25 @@ class Trainer:
     def _tb_log(self, main_tag: str, kwargs: dict[str, float]):
         step = self.current_epoch
 
-        if main_tag == "lr" or main_tag == "beta":
+        if main_tag in ["lr", "beta"]:
             step = self.training_step
 
         for tag, value in kwargs.items():
             self.writer.add_scalar(f"{main_tag}/{tag}", value, step)
+
+
+    def apply_word_dropout(self, input_ids, p=0.1):
+        pad_id = self.model.decoder.config.pad_token_id
+        
+        if self.model.training:
+            mask = (torch.rand(input_ids.shape, device=input_ids.device) < p) & (input_ids != pad_id)
+        else:
+            mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        
+        dropped_input_ids = input_ids.clone()
+        dropped_input_ids[mask] = pad_id
+        
+        return dropped_input_ids
 
 
     def data_collator(self, batch):
@@ -238,7 +260,7 @@ class Trainer:
         return {
             'enc_input_ids': encoder_ids['input_ids'].to(self.config.device),
             'enc_attention_mask': encoder_ids['attention_mask'].to(self.config.device),
-            'dec_input_ids': decoder_ids['input_ids'].to(self.config.device),
+            'dec_input_ids': self.apply_word_dropout(decoder_ids['input_ids'], self.config.word_dropout).to(self.config.device),
             'dec_attention_mask': decoder_ids['attention_mask'].to(self.config.device),
             'labels': labels.to(self.config.device)
         }
@@ -254,15 +276,15 @@ class Trainer:
             with autocast(device_type=self.config.device, dtype=torch.float16):
                 model_output = self.model(**data)
                 if self.model.training:
-                    ce_loss, kl_loss = self.loss(*model_output, data["dec_input_ids"])
+                    ce_loss, kl_loss = self.loss(*model_output, data["labels"])
                 else:
-                    ce_loss, kl_loss = self.loss(*model_output[:-1], data["dec_input_ids"])
+                    ce_loss, kl_loss = self.loss(*model_output[:-1], data["labels"])
         else:
             model_output = self.model(**data)
             if self.model.training:
-                ce_loss, kl_loss = self.loss(*model_output, data["dec_input_ids"])
+                ce_loss, kl_loss = self.loss(*model_output, data["labels"])
             else:
-                ce_loss, kl_loss = self.loss(*model_output[:-1], data["dec_input_ids"])
+                ce_loss, kl_loss = self.loss(*model_output[:-1], data["labels"])
 
         return model_output, ce_loss, kl_loss, data
     
@@ -277,6 +299,7 @@ class Trainer:
         torch.Tensor,
     ]:
         model_output, ce_loss, kl_loss, _ = self._forward_pass(batch)
+        # sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss + 5 * 1 / kl_loss) / self.config.grad_accumulation_steps # 5 because 0.01 * KL + 5 / KL has minimum at ~22.3
         sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss) / self.config.grad_accumulation_steps
 
         if self.config.fp16:
@@ -312,6 +335,7 @@ class Trainer:
             }
         )
         self._tb_log("beta", {"beta": self.beta_scheduler.beta_curr})
+        # self._tb_log("alpha", {"alpha": self.model.kl_coef.item()})
         
         return model_output, ce_loss, kl_loss
 
