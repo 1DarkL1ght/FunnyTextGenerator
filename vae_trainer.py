@@ -94,7 +94,7 @@ class Trainer:
 
 
     def _load_pd_dataframe(self) -> None:
-        self.df = pd.read_csv(self.config.data_path, encoding="utf-8")
+        self.df = pd.read_parquet(self.config.data_path)
 
 
     def _get_tokenizers(self) -> None:
