@@ -1,3 +1,5 @@
+import time
+
 import torch
 
 class EarlyStopping:
@@ -29,3 +31,21 @@ def create_tgt_padding_mask(src: torch.Tensor, padding_value=0):
     tgt_key_padding_mask = torch.cat([mask[:, :, 0].unsqueeze(1), mask], dim=1)
     tgt_key_padding_mask = torch.cat([tgt_key_padding_mask[:, :, 0].unsqueeze(-1), tgt_key_padding_mask], dim=2)
     return tgt_key_padding_mask
+
+def profile(enabled: str):
+    def profile(func):
+        def wrapper(self, *args, **kwargs):
+            attrs = enabled.split(".")
+            value = self
+            for attr in attrs:
+                value = getattr(value, attr)
+            start_time = time.perf_counter()
+            retval = func(self, *args, **kwargs)
+            end_time = time.perf_counter()
+            delta_t = int((end_time - start_time) * 1000)
+            if value:
+                self._tb_log("profile", {func.__name__: delta_t}, global_step=True)
+            return retval
+        return wrapper
+    return profile
+

@@ -7,6 +7,11 @@ class Config:
         self.defaults = defaults
 
 
+    def merge_defaults(self):
+       """"""
+       pass 
+
+
     def __try_convert(self, value):
         try:
             value = float(value)

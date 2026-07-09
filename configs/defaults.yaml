@@ -36,11 +36,16 @@ beta_max_base: 0.0025
 beta_anneal_cycle_length: 10
 beta_anneal_ramp_ratio: 0.5
 beta_anneal_warmup_cycles: 2
+val_generation_samples: 500
 scheduler_type: linear
 workers: 3
+profile: False
+n_tokens: 1
 lora: False
 lora_modules:
  - "c_attn"
 resume: ""
+name: ""
+lambda_: 0.2
 encoder_name: ai-forever/ruBert-large
 decoder_name: ai-forever/rugpt3small_based_on_gpt2

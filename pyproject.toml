@@ -1,0 +1,33 @@
+[project]
+name = "funny-text-generator"
+version = "0.0.1"
+description = "VAE text generation"
+readme = "README.md"
+requires-python = "==3.11.9"
+
+dependencies = [
+    "torch==2.10.0",
+    "torcheval==0.0.7",
+    "torchtune==0.6.1",
+    "torchao==0.15.0",
+    "torchmetrics==1.8.2",
+    "transformers==5.1.0",
+    "peft==0.18.1",
+    "numpy==2.3.5",
+    "pandas==3.0.0",
+    "tqdm==4.67.3",
+    "tensorboard==2.20.0",
+    "rich==14.3.2",
+    "tokenizers==0.22.2",
+    "mlcroissant==1.0.22",
+    "kagglesdk==0.1.15",
+    "huggingface-hub==1.4.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cuda-128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cuda-128" }

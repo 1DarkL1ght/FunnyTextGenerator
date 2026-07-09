@@ -6,6 +6,11 @@ from typing import Any
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split
+from torch.backends.cuda import (
+    can_use_flash_attention,
+    can_use_cudnn_attention,
+    can_use_efficient_attention,
+)
 from torch import autocast
 from torch.amp.grad_scaler import GradScaler
 from torch.utils.tensorboard import SummaryWriter
@@ -25,10 +30,12 @@ from src.metrics import Precision, Recall
 from torchmetrics.classification import MulticlassPrecision, MulticlassRecall
 from src.beta_scheduler import BetaScheduler, LinearBetaScheduler, CyclicBetaScheduler
 from src.loss import VAELoss
-from src.lr_scheduler import custom_lr_scheduler
+from src.lr_scheduler import CustomWarmupDecayScheduler
+from src.utils import profile
 
 # @TODO Distillation
 # @TODO Code refactor
+
 
 class Trainer:
     def __init__(
@@ -63,6 +70,29 @@ class Trainer:
         self.tsne: int = self.config.tsne
 
 
+    def _check_attn_backend(self):
+        backends = [
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+            torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+            torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+            torch.nn.attention.SDPBackend.MATH,
+        ]
+        for backend in backends:
+            try:
+                with torch.nn.attention.sdpa_kernel(backend):
+                    example_input = torch.zeros((1, 1), dtype=torch.long).to(self.config.device)
+                    self.model(
+                        example_input,
+                        example_input,
+                        example_input,
+                        example_input,
+                    )
+                print(f"Using {backend.name} attention backend.")
+                break
+            except:
+                pass
+
+
     def _load_pd_dataframe(self) -> None:
         self.df = pd.read_csv(self.config.data_path, encoding="utf-8")
 
@@ -72,11 +102,11 @@ class Trainer:
         self.encoder_tokenizer.padding_side = "right"
         self.decoder_tokenizer = AutoTokenizer.from_pretrained(self.config.decoder_name)
         self.decoder_tokenizer.pad_token = self.decoder_tokenizer.eos_token
-        self.decoder_tokenizer.padding_side = "left"
-
+        self.decoder_tokenizer.padding_side = "right"
 
     def _setup_loss(self) -> None:
         self.loss = VAELoss(
+            lambda_=self.config.lambda_,
             ignore_index=-100,
             device=self.config.device,
         )
@@ -106,7 +136,7 @@ class Trainer:
         #     self.config.warmup_steps * len(self.trainloader),
         #     self.config.epochs * len(self.trainloader),
         # )
-        self.scheduler = custom_lr_scheduler(
+        self.scheduler = CustomWarmupDecayScheduler(
             self.optimizer,
             self.config.warmup_steps * len(self.trainloader),
             self.config.epochs * len(self.trainloader),
@@ -127,7 +157,6 @@ class Trainer:
                 ratio=self.config.beta_anneal_ramp_ratio,
                 warmup_cycles=self.config.beta_anneal_warmup_cycles,
             )
-
 
 
     def _get_dataloaders(self) -> tuple[int, int]:
@@ -160,10 +189,10 @@ class Trainer:
 
         return train_texts, val_texts
 
+
     def _compile_model(self):
-        self.model.compile(
-            dynamic=False,
-        )
+        self.model.forward = torch.compile(self.model.forward, mode="reduce-overhead")
+
 
     def _build_model(self) -> None:
         self.model = PretrainedNetwork(
@@ -171,6 +200,7 @@ class Trainer:
             decoder_name=self.config.decoder_name,
             latent_dim=self.config.latent_dim,
             max_length=self.config.max_len,
+            n_tokens=self.config.n_tokens,
             top_p=0.9,
             top_k=50,
             temperature=0.8,
@@ -188,7 +218,7 @@ class Trainer:
             "NAdam": torch.optim.NAdam,
             }
         
-        mapping_params = [param for name, param in self.model.named_parameters() if "mapping" in name and param.requires_grad]
+        mapping_params = [param for name, param in self.model.named_parameters() if ("mapping" in name) or ("z_pos_embed" in name) and param.requires_grad]
         if self.config.lora:
             backbone_params = [p for n, p in self.model.named_parameters() if (("lora" in n) or ("encoder" in n)) and ("mapping" not in n) and p.requires_grad]
         else:
@@ -215,10 +245,10 @@ class Trainer:
         )
 
 
-    def _tb_log(self, main_tag: str, kwargs: dict[str, float]):
+    def _tb_log(self, main_tag: str, kwargs: dict[str, float], global_step=False):
         step = self.current_epoch
 
-        if main_tag in ["lr", "beta"]:
+        if global_step:
             step = self.training_step
 
         for tag, value in kwargs.items():
@@ -239,6 +269,7 @@ class Trainer:
         return dropped_input_ids
 
 
+    @profile("config.profile")
     def data_collator(self, batch):
         encoder_ids = self.encoder_tokenizer(
             batch,
@@ -262,68 +293,63 @@ class Trainer:
             'enc_attention_mask': encoder_ids['attention_mask'].to(self.config.device),
             'dec_input_ids': self.apply_word_dropout(decoder_ids['input_ids'], self.config.word_dropout).to(self.config.device),
             'dec_attention_mask': decoder_ids['attention_mask'].to(self.config.device),
-            'labels': labels.to(self.config.device)
-        }
+        }, labels.to(self.config.device)
 
 
-    def _forward_pass(self, batch: torch.Tensor) -> tuple[tuple[torch.Tensor,
-                                                                torch.Tensor,
-                                                                torch.Tensor],
-                                                          torch.Tensor,
-                                                          torch.Tensor]:
-        data = self.data_collator(batch)
-        if self.config.fp16:
-            with autocast(device_type=self.config.device, dtype=torch.float16):
+    @profile("config.profile")
+    def _forward_pass(self, batch: torch.Tensor) -> tuple[
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        data, labels = self.data_collator(batch)
+        with torch.nn.attention.sdpa_kernel(
+            [
+                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                torch.nn.attention.SDPBackend.MATH,
+            ],
+            set_priority=True,
+        ):
+            with autocast(device_type=self.config.device, dtype=torch.bfloat16, enabled=bool(self.config.fp16)):
                 model_output = self.model(**data)
-                if self.model.training:
-                    ce_loss, kl_loss = self.loss(*model_output, data["labels"])
-                else:
-                    ce_loss, kl_loss = self.loss(*model_output[:-1], data["labels"])
-        else:
-            model_output = self.model(**data)
-            if self.model.training:
-                ce_loss, kl_loss = self.loss(*model_output, data["labels"])
-            else:
-                ce_loss, kl_loss = self.loss(*model_output[:-1], data["labels"])
+                ce_loss, kl_loss, kl_loss_raw = self.loss(*(model_output[:-1]), labels)
 
-        return model_output, ce_loss, kl_loss, data
-    
+        return model_output, ce_loss, kl_loss, kl_loss_raw, data
 
+
+    @profile("config.profile")
     def _training_step(self, batch: torch.Tensor) -> tuple[
         tuple[
             torch.Tensor,
             torch.Tensor, 
             torch.Tensor,
+            torch.Tensor,
         ],
         torch.Tensor,
         torch.Tensor,
     ]:
-        model_output, ce_loss, kl_loss, _ = self._forward_pass(batch)
-        # sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss + 5 * 1 / kl_loss) / self.config.grad_accumulation_steps # 5 because 0.01 * KL + 5 / KL has minimum at ~22.3
+        model_output, ce_loss, kl_loss, kl_loss_raw, _ = self._forward_pass(batch)
         sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss) / self.config.grad_accumulation_steps
 
-        if self.config.fp16:
-            self.scaler.scale(sum_loss).backward()
-        else:
-            sum_loss.backward()
+        sum_loss.backward()
 
-        if (self.training_step + 1) % self.config.grad_accumulation_steps == 0:
-            if self.config.fp16:
-                self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
-            if self.config.fp16:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                self.optimizer.step()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
 
-            self.optimizer.zero_grad()
-
-            for _ in range(self.config.grad_accumulation_steps):
-                self.scheduler.step()
-                self.beta_scheduler.step()
+        for _ in range(self.config.grad_accumulation_steps):
+            self.scheduler.step()
+            self.beta_scheduler.step()
 
         self.training_step += 1
 
@@ -332,30 +358,33 @@ class Trainer:
             {
                 "lr1": self.optimizer.param_groups[0]["lr"],
                 "lr2": self.optimizer.param_groups[1]["lr"],
-            }
+            },
+            global_step=True,
         )
-        self._tb_log("beta", {"beta": self.beta_scheduler.beta_curr})
-        # self._tb_log("alpha", {"alpha": self.model.kl_coef.item()})
+        self._tb_log("beta", {"beta": self.beta_scheduler.beta_curr}, global_step=True)
         
-        return model_output, ce_loss, kl_loss
+        return model_output, ce_loss, kl_loss_raw
 
 
+    @profile("config.profile")
     def _update_metrics(
         self,
         logits: torch.Tensor,
-        inference_ids: torch.Tensor,
         batch_tokenized: torch.Tensor,
         target: torch.Tensor,
+        inference_ids: torch.Tensor | None = None,
     ) -> None:
         # aligned_logits = logits[:, :, :len(self.decoder_tokenizer)]
-        decoded_pred_texts = self.decoder_tokenizer.batch_decode(inference_ids.tolist(), skip_special_tokens=True)
         self.perplexity.update(logits, batch_tokenized)
         # self.precision.update(aligned_logits.transpose(2, 1), batch_tokenized)
         # self.recall.update(aligned_logits.transpose(2, 1), batch_tokenized)
-        self.word_error_rate.update(decoded_pred_texts, target)
-        self.word_information_preserved.update(decoded_pred_texts, target)
+        if inference_ids is not None:
+            decoded_pred_texts = self.decoder_tokenizer.batch_decode(inference_ids.tolist(), skip_special_tokens=True)
+            self.word_error_rate.update(decoded_pred_texts, target)
+            self.word_information_preserved.update(decoded_pred_texts, target)
 
 
+    @profile("config.profile")
     def _compute_metrics(self) -> dict[str, float]:
         output = {}
 
@@ -374,15 +403,21 @@ class Trainer:
         # self.recall.reset()
 
 
-    def _validation_step(self, batch: torch.Tensor) -> tuple[
+    @profile("config.profile")
+    def _validation_step(self, batch: torch.Tensor, do_generate: bool=False) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor,
     ]:
-        with torch.no_grad():
-            model_output, ce_loss, kl_loss, data = self._forward_pass(batch)
+        with torch.inference_mode():
+            model_output, ce_loss, _, kl_loss_raw, data = self._forward_pass(batch)
 
-        self._update_metrics(model_output[-2], model_output[-1], data["dec_input_ids"], batch)
+        self._update_metrics(
+            logits=model_output[-2],
+            batch_tokenized=data["dec_input_ids"],
+            target=batch,
+            inference_ids=self.model.forward_inference(model_output[-1]) if do_generate else None,
+        )
 
-        return model_output, ce_loss, kl_loss
+        return model_output, ce_loss, kl_loss_raw
 
 
     def _training_epoch(
@@ -392,24 +427,20 @@ class Trainer:
     ) -> tuple[float, float]:
         self.model.train()
 
-        local_training_step = 0
-
         running_ce_loss = 0
         running_kl_loss = 0
 
-        for data in self.trainloader:
+        for i, data in enumerate(self.trainloader):
             _, ce_loss, kl_loss = self._training_step(data)
 
             progress.update(
                 step_task,
                 advance=1,
-                info=f"Step: {local_training_step}/{self.train_epoch_len} beta={self.beta_scheduler.beta_curr:.5f} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Lr1={self.optimizer.param_groups[0]["lr"]:.8f} Lr2={self.optimizer.param_groups[1]["lr"]:.8f}"
+                info=f"Step: {i}/{self.train_epoch_len} beta={self.beta_scheduler.beta_curr:.5f} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Lr1={self.optimizer.param_groups[0]['lr']:.8f} Lr2={self.optimizer.param_groups[1]['lr']:.8f}"
             )
 
             running_ce_loss += ce_loss.item()
             running_kl_loss += kl_loss.item()
-
-            local_training_step += 1
 
         running_ce_loss /= len(self.trainloader)
         running_kl_loss /= len(self.trainloader)
@@ -432,45 +463,43 @@ class Trainer:
         self.model.eval()
         self._reset_metrics()
 
-        local_validation_step = 0
+        do_generate_interval = max(1, len(self.valloader) // self.config.val_generation_samples)
 
         running_ce_loss = 0
         running_kl_loss = 0
         self.tsne = self.config.tsne
 
         mu_arr = []
-        with torch.no_grad():
-            for i, data in enumerate(self.valloader):
-                (mu, _, _, _), ce_loss, kl_loss = self._validation_step(data)
+        for i, data in enumerate(self.valloader):
+            do_generate = (i % do_generate_interval == 0) and (self.config.val_generation_samples > 0)
+            model_output, ce_loss, kl_loss = self._validation_step(data, do_generate=do_generate)
 
-                if self.config.tsne > 0 and self.tsne > 0:
-                    mu_arr.append(mu)
-                    self.tsne -= self.config.val_batch_size
+            if self.config.tsne > 0 and self.tsne > 0:
+                mu_arr.append(model_output[0])
+                self.tsne -= self.config.val_batch_size
 
-                metrics = self._compute_metrics()
-                progress.update(
-                    step_task,
-                    advance=1,
-                    info=f'Step: {local_validation_step}/{self.val_epoch_len} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Perplexity={metrics["perplexity"]:.4f} \
-WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
-                )
+            metrics = self._compute_metrics()
+            progress.update(
+                step_task,
+                advance=1,
+                info=f'Step: {i}/{self.val_epoch_len} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Perplexity={metrics["perplexity"]:.4f} WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
+            )
 
-                running_ce_loss += ce_loss.item()
-                running_kl_loss += kl_loss.item()
-                
-                local_validation_step += 1
+            running_ce_loss += ce_loss.item()
+            running_kl_loss += kl_loss.item()
 
         running_ce_loss /= len(self.valloader)
         running_kl_loss /= len(self.valloader)
 
-        if self.config.tsne > 0 and self.current_epoch % 10 == 0:
+        if self.config.tsne > 0:
             mu_arr_tensor = torch.cat(mu_arr, dim=0).detach().cpu()
             metadata = [str(self.current_epoch) for i in range(mu_arr_tensor.size(0))]
-            self.writer.add_embedding(mat=mu_arr_tensor,
-                                      metadata=metadata,
-                                      tag="latent-space",
-                                      global_step=self.current_epoch
-                                      )
+            self.writer.add_embedding(
+                mat=mu_arr_tensor,
+                metadata=metadata,
+                tag="latent-space",
+                global_step=self.current_epoch
+            )
 
         metrics = self._compute_metrics()
 
@@ -480,12 +509,13 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
         return running_ce_loss, running_kl_loss, metrics, mu_arr
 
 
+    @profile("config.profile")
     def _inference(self):
         texts = []
 
         for i in range(self.config.inference_size):
             noise = torch.randn(1, self.config.latent_dim).to(self.config.device, dtype=self.model.decoder.dtype)
-            with torch.no_grad():
+            with torch.inference_mode():
                 text = self.model.forward_inference(noise)
             decoded_text = self.decoder_tokenizer.decode(text[0], skip_special_tokens=True)
             texts.append(decoded_text)
@@ -494,17 +524,20 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
         return texts
 
 
-    def _save_ckpt(self, path: str):
-        ckpt = {
-            "model": self.model.state_dict(),
-            "optim": self.optimizer.state_dict(),
-            "lr_scheduler": self.scheduler.state_dict(),
-            "beta_scheduler": self.beta_scheduler.state_dict(),
-            "current_epoch": self.current_epoch,
-            "best_loss": self.best_loss,
-            "patience_step": self.patience_step,
-            "writer_log_dir": self.writer.log_dir
-        }
+    def _save_ckpt(self, path: str, strip: bool=False):
+        if not strip:
+            ckpt = {
+                "model": self.model.state_dict(),
+                "optim": self.optimizer.state_dict(),
+                "lr_scheduler": self.scheduler.state_dict(),
+                "beta_scheduler": self.beta_scheduler.state_dict(),
+                "current_epoch": self.current_epoch,
+                "best_loss": self.best_loss,
+                "patience_step": self.patience_step,
+                "writer_log_dir": self.writer.log_dir,
+            }
+        else:
+            ckpt = self.model.state_dict()
 
         torch.save(ckpt, path)
 
@@ -557,7 +590,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
         if self.config.resume:
             self._load_ckpt(self.config.resume)
         else:
-            self.writer = SummaryWriter()
+            self.writer = SummaryWriter(log_dir=("runs/" + self.config.name) if self.config.name else None)
 
         # Adding model graph
         if not self.config.resume:
@@ -570,14 +603,14 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
                         example_input,
                         example_input,
                         example_input,
-                        example_input,
                     ),
                     strict=False),
                 [],
             )
             print(f"{current_time_str}. Model graph visualization added.")
 
-        self._compile_model()
+        # self._compile_model()
+        self._check_attn_backend()
 
         # Train loop
         current_time = datetime.now()
@@ -588,10 +621,11 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
             print(f"{current_time_str}. Training started.")
 
         with Progress(*columns, console=console, transient=False) as progress:
-            epoch_task = progress.add_task("Epochs",
-                                           total=self.config.epochs,
-                                           info="",
-                                           )
+            epoch_task = progress.add_task(
+                "Epochs",
+                total=self.config.epochs,
+                info="",
+            )
             if self.config.resume:
                 progress.update(
                     epoch_task,
@@ -599,15 +633,17 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
                     info=""
                 )
 
-            train_step_task = progress.add_task("Train steps",
-                                                total=len(self.trainloader),
-                                                info="",
-                                                )
-            val_step_task = progress.add_task("Val steps",
-                                              total=len(self.valloader),
-                                              info="",
-                                              start=False,
-                                              )
+            train_step_task = progress.add_task(
+                "Train steps",
+                total=len(self.trainloader),
+                info="",
+            )
+            val_step_task = progress.add_task(
+                "Val steps",
+                total=len(self.valloader),
+                info="",
+                start=False,
+            )
 
             for epoch in range(self.config.epochs):
                 progress.reset(train_step_task)
