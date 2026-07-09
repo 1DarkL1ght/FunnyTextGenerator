@@ -23,6 +23,7 @@ dependencies = [
     "kagglesdk==0.1.15",
     "huggingface-hub==1.4.1",
     "jsonargparse==4.49.0",
+    "setuptools<82",
 ]
 
 [[tool.uv.index]]
