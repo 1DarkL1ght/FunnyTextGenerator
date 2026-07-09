@@ -42,7 +42,7 @@ def profile(enabled: str):
             start_time = time.perf_counter()
             retval = func(self, *args, **kwargs)
             end_time = time.perf_counter()
-            delta_t = int((end_time - start_time) * 1000)
+            delta_t = end_time - start_time
             if value:
                 self._tb_log("profile", {func.__name__: delta_t}, global_step=True)
             return retval
