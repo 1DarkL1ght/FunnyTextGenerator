@@ -3,6 +3,7 @@ import yaml
 import warnings
 import builtins
 import logging
+import os
 
 from jsonargparse import CLI
 import torch
@@ -12,6 +13,7 @@ from vae_trainer import Trainer
 from src.config import Config
 
 def main(args_path: Path | str):
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     warnings.filterwarnings("ignore")
     logging.basicConfig(level=logging.CRITICAL)
     logging.getLogger().setLevel(logging.ERROR)
