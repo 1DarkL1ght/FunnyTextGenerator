@@ -101,7 +101,6 @@ class Trainer:
         self.encoder_tokenizer = AutoTokenizer.from_pretrained(self.config.encoder_name)
         self.encoder_tokenizer.padding_side = "right"
         self.decoder_tokenizer = AutoTokenizer.from_pretrained(self.config.decoder_name)
-        self.decoder_tokenizer.pad_token = self.decoder_tokenizer.eos_token
         self.decoder_tokenizer.padding_side = "right"
 
     def _setup_loss(self) -> None:
@@ -410,12 +409,21 @@ class Trainer:
         with torch.inference_mode():
             model_output, ce_loss, _, kl_loss_raw, data = self._forward_pass(batch)
 
-        self._update_metrics(
-            logits=model_output[-2],
-            batch_tokenized=data["dec_input_ids"],
-            target=batch,
-            inference_ids=self.model.forward_inference(model_output[-1]) if do_generate else None,
-        )
+        with torch.nn.attention.sdpa_kernel(
+            [
+                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                torch.nn.attention.SDPBackend.MATH,
+            ],
+            set_priority=True,
+        ):
+            self._update_metrics(
+                logits=model_output[-2],
+                batch_tokenized=data["dec_input_ids"],
+                target=batch,
+                inference_ids=self.model.forward_inference(model_output[-1]) if do_generate else None,
+            )
 
         return model_output, ce_loss, kl_loss_raw
 
@@ -648,7 +656,7 @@ class Trainer:
             for epoch in range(self.config.epochs):
                 progress.reset(train_step_task)
                 progress.reset(val_step_task, start=False)
-                train_ce_loss, train_kl_loss = self._training_epoch(progress, train_step_task)
+                # train_ce_loss, train_kl_loss = self._training_epoch(progress, train_step_task)
                 progress.start_task(val_step_task)
                 torch.cuda.empty_cache()
                 val_ce_loss, val_kl_loss, metrics, mu_arr = self._validatin_epoch(progress, val_step_task)
@@ -662,7 +670,7 @@ WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
                 self._inference()
                 current_time = datetime.now()
                 current_time_str = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-                print(f"{current_time_str}. Epoch {self.current_epoch}\nTrain CE loss: {train_ce_loss:.4f}, Train KL loss: {train_kl_loss:.4f}")
+                # print(f"{current_time_str}. Epoch {self.current_epoch}\nTrain CE loss: {train_ce_loss:.4f}, Train KL loss: {train_kl_loss:.4f}")
                 print(f"Val CE loss: {val_ce_loss:.4f}, Val KL loss: {val_kl_loss:.4f}")
                 print(f'Perplexity: {metrics["perplexity"]:.3f}, WER: {metrics["wer"]:.3f}, WIP: {metrics["wip"]:.3f}')
                 mu_arr = torch.vstack(mu_arr).squeeze(dim=1)

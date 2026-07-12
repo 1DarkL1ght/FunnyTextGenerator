@@ -109,6 +109,7 @@ class PretrainedNetwork(nn.Module):
         self.encoder = AutoModel.from_pretrained(encoder_name)
 
         self.decoder = AutoModelForCausalLM.from_pretrained(decoder_name)
+        # self.decoder.enable_input_require_grads()
         if lora:
             from peft import LoraConfig, get_peft_model
             lora_config = LoraConfig(
@@ -123,7 +124,8 @@ class PretrainedNetwork(nn.Module):
             self.decoder = get_peft_model(self.decoder, lora_config)
             self.decoder.print_trainable_parameters()
 
-        self.decoder.config.pad_token_id = self.decoder.config.eos_token_id
+        # self.encoder.gradient_checkpointing_enable()
+        # self.decoder.gradient_checkpointing_enable()
 
         self.mapping_encoder = MappingEncoder(
             d_model=self.encoder.config.hidden_size,
@@ -160,13 +162,13 @@ class PretrainedNetwork(nn.Module):
         # ).logits[:, :-1, :]
         return mu, log_var, decoder_output, z
 
-    
+
     @torch.no_grad()
     def forward_inference(
         self,
         noise: torch.Tensor,
     ):
-        z_upscaled = self.mapping_decoder(noise)
+        z_upscaled = self.mapping_decoder(noise).contiguous()
         generated_ids = self.decoder.generate(
             inputs_embeds=z_upscaled,
             max_new_tokens=self.max_length,
