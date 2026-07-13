@@ -99,16 +99,15 @@ class PretrainedNetwork(nn.Module):
         lora_modules: list[str],
     ):
         super().__init__()
-        self.training = True
         self.max_length = max_length
         self.top_p = top_p
         self.top_k = top_k
         self.temperature = temperature
         self.n_tokens = n_tokens
 
-        self.encoder = AutoModel.from_pretrained(encoder_name)
+        self.encoder = AutoModel.from_pretrained(encoder_name, attn_implementation="sdpa")
 
-        self.decoder = AutoModelForCausalLM.from_pretrained(decoder_name)
+        self.decoder = AutoModelForCausalLM.from_pretrained(decoder_name, attn_implementation="sdpa")
         # self.decoder.enable_input_require_grads()
         if lora:
             from peft import LoraConfig, get_peft_model
@@ -168,7 +167,7 @@ class PretrainedNetwork(nn.Module):
         self,
         noise: torch.Tensor,
     ):
-        z_upscaled = self.mapping_decoder(noise).contiguous()
+        z_upscaled = self.mapping_decoder(noise)
         generated_ids = self.decoder.generate(
             inputs_embeds=z_upscaled,
             max_new_tokens=self.max_length,

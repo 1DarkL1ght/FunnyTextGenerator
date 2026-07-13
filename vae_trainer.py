@@ -255,15 +255,15 @@ class Trainer:
 
 
     def apply_word_dropout(self, input_ids, p=0.1):
-        pad_id = self.model.decoder.config.pad_token_id
+        unk_id = self.decoder_tokenizer.unk_token_id
         
         if self.model.training:
-            mask = (torch.rand(input_ids.shape, device=input_ids.device) < p) & (input_ids != pad_id)
+            mask = (torch.rand(input_ids.shape, device=input_ids.device) < p) & (input_ids != unk_id)
         else:
             mask = torch.zeros_like(input_ids, dtype=torch.bool)
         
         dropped_input_ids = input_ids.clone()
-        dropped_input_ids[mask] = pad_id
+        dropped_input_ids[mask] = unk_id
         
         return dropped_input_ids
 
@@ -341,14 +341,15 @@ class Trainer:
 
         sum_loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        if (self.training_step + 1) % self.config.grad_accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
-        for _ in range(self.config.grad_accumulation_steps):
-            self.scheduler.step()
-            self.beta_scheduler.step()
+            for _ in range(self.config.grad_accumulation_steps):
+                self.scheduler.step()
+                self.beta_scheduler.step()
 
         self.training_step += 1
 
@@ -407,17 +408,17 @@ class Trainer:
         torch.Tensor, torch.Tensor, torch.Tensor,
     ]:
         with torch.inference_mode():
-            model_output, ce_loss, _, kl_loss_raw, data = self._forward_pass(batch)
-
-        with torch.nn.attention.sdpa_kernel(
-            [
-                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
-                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,
-            ],
-            set_priority=True,
-        ):
+            with torch.nn.attention.sdpa_kernel(
+                [
+                    torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                    torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                    torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                    torch.nn.attention.SDPBackend.MATH,
+                ],
+                set_priority=True,
+            ):
+                model_output, ce_loss, _, kl_loss_raw, data = self._forward_pass(batch)
+            # do not wrap forward inference method into sdpa_kernel because of undocumented bug causing CUDA error
             self._update_metrics(
                 logits=model_output[-2],
                 batch_tokenized=data["dec_input_ids"],
@@ -458,7 +459,7 @@ class Trainer:
         return running_ce_loss, running_kl_loss
 
 
-    def _validatin_epoch(
+    def _validation_epoch(
         self,
         progress: Progress,
         step_task,
@@ -659,7 +660,7 @@ class Trainer:
                 # train_ce_loss, train_kl_loss = self._training_epoch(progress, train_step_task)
                 progress.start_task(val_step_task)
                 torch.cuda.empty_cache()
-                val_ce_loss, val_kl_loss, metrics, mu_arr = self._validatin_epoch(progress, val_step_task)
+                val_ce_loss, val_kl_loss, metrics, mu_arr = self._validation_epoch(progress, val_step_task)
                 torch.cuda.empty_cache()
                 progress.update(
                     epoch_task,

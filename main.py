@@ -14,6 +14,7 @@ from src.config import Config
 
 def main(args_path: Path | str):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    torch.use_deterministic_algorithms(True, warn_only=True)
     warnings.filterwarnings("ignore")
     logging.basicConfig(level=logging.CRITICAL)
     logging.getLogger().setLevel(logging.ERROR)
