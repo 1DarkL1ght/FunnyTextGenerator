@@ -29,4 +29,3 @@ def main(args_path: Path | str):
 
 if __name__ == "__main__":
     CLI(main, as_positional=False)
-

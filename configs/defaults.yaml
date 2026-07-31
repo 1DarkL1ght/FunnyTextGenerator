@@ -49,3 +49,7 @@ name: ""
 lambda_: 0.2
 encoder_name: ai-forever/ruBert-large
 decoder_name: ai-forever/rugpt3small_based_on_gpt2
+
+num_themes: 226
+num_actors: 200
+num_mechanisms: 56

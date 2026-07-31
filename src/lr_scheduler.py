@@ -30,17 +30,28 @@ class CustomWarmupDecayScheduler(_LRScheduler):
     def __init__(self, optimizer, num_warmup_steps, num_training_steps, lr1, lr2, last_epoch=-1):
         self.num_warmup_steps = num_warmup_steps
         self.num_training_steps = num_training_steps
-        self.start_mult = lr1 / lr2
+        self.lr1 = lr1
+        self.lr2 = lr2
         super().__init__(optimizer, last_epoch)
 
     def get_lr(self):
         step = self.last_epoch
+
         if step < self.num_warmup_steps:
             progress = step / max(1, self.num_warmup_steps)
-            mult_0 = self.start_mult + progress * (1.0 - self.start_mult)
-            mult_1 = progress
-            return [base_lr * mult_0 if i == 0 else base_lr * mult_1 for i, base_lr in enumerate(self.base_lrs)]
-        
-        decay_progress = (self.num_training_steps - step) / max(1, self.num_training_steps - self.num_warmup_steps)
-        decay_mult = max(0.0, decay_progress)
-        return [base_lr * decay_mult for base_lr in self.base_lrs]
+
+            lr_mapping = self.lr1 + progress * (self.lr2 - self.lr1)
+            lr_backbone = progress * self.lr2
+            
+            return [lr_mapping, lr_backbone]
+
+        decay_steps = self.num_training_steps - self.num_warmup_steps
+        current_decay_step = step - self.num_warmup_steps
+
+        decay_progress = current_decay_step / max(1, decay_steps)
+        decay_mult = max(0.0, 1.0 - decay_progress)
+
+        lr_mapping = self.lr2 * decay_mult
+        lr_backbone = self.lr2 * decay_mult
+
+        return [lr_mapping, lr_backbone]

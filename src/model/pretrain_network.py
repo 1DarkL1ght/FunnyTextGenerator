@@ -15,7 +15,6 @@ class MappingBlock(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.ln_out = nn.LayerNorm(out_features) if last_ln else nn.Identity()
         self.skip = skip
-        self.skip = skip
 
 
     def forward(self, x):
@@ -50,10 +49,10 @@ class MappingEncoder(nn.Module):
         return z
 
     def forward(self, x: torch.Tensor):
-        out = self.blk_1(x)
-        out = self.blk_2(out)
-        mu = self.mu_layer(out)
-        log_var = self.log_var_layer(out)
+        # out = self.blk_1(x)
+        # out = self.blk_2(out)
+        mu = self.mu_layer(x)
+        log_var = self.log_var_layer(x)
         z = self.reparametrize(mu, log_var)
         return mu, log_var, z
 
@@ -70,18 +69,37 @@ class MappingDecoder(nn.Module):
     ):
         super().__init__()
         self.blk_1 = MappingBlock(latent_dim, d_model, dropout=0, skip=False)
-        self.blk_2 = MappingBlock(d_model, (n_tokens // 2) * d_model, dropout=0, last_ln=True, skip=False)
-        self.fc1 = nn.Linear((n_tokens // 2) * d_model, d_model * n_tokens)
+        self.blk_2 = MappingBlock(d_model, min((n_tokens // 2), 1) * d_model, dropout=0, last_ln=True, skip=False)
+        self.fc1 = nn.Linear(min((n_tokens // 2), 1) * d_model, d_model * n_tokens)
+        self.fc_only = nn.Linear(latent_dim, d_model)
         self.last_ln = nn.LayerNorm(d_model)
         self.d_model = d_model
         self.n_tokens = n_tokens
     
     def forward(self, x: torch.Tensor):
-        out = self.blk_1(x)
-        out = self.blk_2(out)
-        out = self.fc1(out)
-        out = out.view(-1, self.n_tokens, self.d_model)
-        return self.last_ln(out)
+        # out = self.blk_1(x)
+        # out = self.blk_2(out)
+        # out = self.fc1(out)
+        # out = out.view(-1, self.n_tokens, self.d_model)
+        return self.fc_only(x).view(-1, self.n_tokens, self.d_model)
+        # return self.last_ln(out)
+
+
+class MultilabelClassificationHead(nn.Module):
+    def __init__(
+        self,
+        latent_dim: int,
+        nc: int,
+        hidden_size: int = 0,
+    ):
+        super().__init__()
+        hidden_size = hidden_size or latent_dim // 2
+        self.fc1 = nn.Linear(latent_dim, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, nc)
+
+
+    def forward(self, x):
+        return self.fc2(nn.functional.silu(self.fc1(x)))
 
 
 class PretrainedNetwork(nn.Module):
@@ -91,10 +109,14 @@ class PretrainedNetwork(nn.Module):
         decoder_name: str,
         latent_dim: int,
         max_length: int,
+        num_themes: int,
+        num_actors: int,
+        num_mechanisms: int,
         n_tokens: int,
         top_p: float,
         top_k: int,
         temperature: float,
+        fp16: bool,
         lora: bool,
         lora_modules: list[str],
     ):
@@ -105,9 +127,35 @@ class PretrainedNetwork(nn.Module):
         self.temperature = temperature
         self.n_tokens = n_tokens
 
-        self.encoder = AutoModel.from_pretrained(encoder_name, attn_implementation="sdpa")
+        self.target_dtype = torch.bfloat16 if fp16 else torch.float32
 
-        self.decoder = AutoModelForCausalLM.from_pretrained(decoder_name, attn_implementation="sdpa")
+        self.themes_cls_head = MultilabelClassificationHead(
+            latent_dim,
+            num_themes,
+        )
+
+        self.mechanisms_cls_head = MultilabelClassificationHead(
+            latent_dim,
+            num_mechanisms,
+        )
+
+        self.actors_cls_head = MultilabelClassificationHead(
+            latent_dim,
+            num_actors,
+        )
+
+        self.encoder = AutoModel.from_pretrained(
+            encoder_name,
+            torch_dtype=self.target_dtype,
+            attn_implementation="flash_attention_2",
+        )
+
+        self.decoder = AutoModelForCausalLM.from_pretrained(
+            decoder_name,
+            torch_dtype=self.target_dtype,
+            attn_implementation="flash_attention_2",
+        )
+
         # self.decoder.enable_input_require_grads()
         if lora:
             from peft import LoraConfig, get_peft_model
@@ -153,13 +201,19 @@ class PretrainedNetwork(nn.Module):
         z_mask = torch.full((dec_attention_mask.shape[0], self.n_tokens), 1, device=dec_attention_mask.device)
         full_decoder_attention_mask = torch.cat((z_mask, dec_attention_mask), dim=1)
 
+        themes_cls_out = self.themes_cls_head(z)
+        mechanisms_cls_out = self.mechanisms_cls_head(z)
+        actors_cls_out = self.actors_cls_head(z)
+
         decoder_output = self.decoder(
             inputs_embeds=decoder_embeddings,
+            # input_ids=dec_input_ids,
             attention_mask=full_decoder_attention_mask,
+            # attention_mask=dec_attention_mask,
             labels=None, # no loss calculation
         ).logits[:, (self.n_tokens-1):-1, :]
         # ).logits[:, :-1, :]
-        return mu, log_var, decoder_output, z
+        return mu, log_var, decoder_output, (actors_cls_out, themes_cls_out, mechanisms_cls_out), z
 
 
     @torch.no_grad()
@@ -170,6 +224,7 @@ class PretrainedNetwork(nn.Module):
         z_upscaled = self.mapping_decoder(noise)
         generated_ids = self.decoder.generate(
             inputs_embeds=z_upscaled,
+            # input_ids=torch.Tensor([[self.decoder.config.bos_token_id]], dtype=torch.long),
             max_new_tokens=self.max_length,
             do_sample=True,
             top_p=self.top_p,

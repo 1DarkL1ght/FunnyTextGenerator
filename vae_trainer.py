@@ -79,14 +79,15 @@ class Trainer:
         ]
         for backend in backends:
             try:
-                with torch.nn.attention.sdpa_kernel(backend):
-                    example_input = torch.zeros((1, 1), dtype=torch.long).to(self.config.device)
-                    self.model(
-                        example_input,
-                        example_input,
-                        example_input,
-                        example_input,
-                    )
+                with autocast(device_type=self.config.device, dtype=torch.bfloat16, enabled=bool(self.config.fp16)):
+                    with torch.nn.attention.sdpa_kernel(backend):
+                        example_input = torch.zeros((1, 1), dtype=torch.long).to(self.config.device)
+                        self.model(
+                            example_input,
+                            example_input,
+                            example_input,
+                            example_input,
+                        )
                 print(f"Using {backend.name} attention backend.")
                 break
             except:
@@ -126,6 +127,33 @@ class Trainer:
             num_classes=len(self.decoder_tokenizer),
             average='micro',
             ignore_index=self.model.decoder.config.pad_token_id,
+        ).to(self.config.device)
+
+        self.theme_precision = MulticlassPrecision(
+            num_classes=self.config.num_themes,
+            average='micro',
+        ).to(self.config.device)
+        self.theme_recall = MulticlassRecall(
+            num_classes=self.config.num_themes,
+            average='micro',
+        ).to(self.config.device)
+
+        self.actors_precision = MulticlassPrecision(
+            num_classes=self.config.num_actors,
+            average='micro',
+        ).to(self.config.device)
+        self.actors_recall = MulticlassRecall(
+            num_classes=self.config.num_actors,
+            average='micro',
+        ).to(self.config.device)
+
+        self.mechanism_precision = MulticlassPrecision(
+            num_classes=self.config.num_mechanisms,
+            average='micro',
+        ).to(self.config.device)
+        self.mechanism_recall = MulticlassRecall(
+            num_classes=self.config.num_mechanisms,
+            average='micro',
         ).to(self.config.device)
 
 
@@ -198,11 +226,15 @@ class Trainer:
             encoder_name=self.config.encoder_name,
             decoder_name=self.config.decoder_name,
             latent_dim=self.config.latent_dim,
+            num_themes=self.config.num_themes,
+            num_mechanisms=self.config.num_mechanisms,
+            num_actors=self.config.num_actors,
             max_length=self.config.max_len,
             n_tokens=self.config.n_tokens,
             top_p=0.9,
             top_k=50,
             temperature=0.8,
+            fp16=self.config.fp16,
             lora=self.config.lora,
             lora_modules=self.config.lora_modules,
         ).to(self.config.device)
@@ -244,14 +276,14 @@ class Trainer:
         )
 
 
-    def _tb_log(self, main_tag: str, kwargs: dict[str, float], global_step=False):
+    def _tb_log(self, main_tag: str, kwargs: dict[str, float], global_step=False, gloabl_val_step: int | None = None):
         step = self.current_epoch
 
         if global_step:
             step = self.training_step
 
         for tag, value in kwargs.items():
-            self.writer.add_scalar(f"{main_tag}/{tag}", value, step)
+            self.writer.add_scalar(f"{main_tag}/{tag}", value, gloabl_val_step or step)
 
 
     def apply_word_dropout(self, input_ids, p=0.1):
@@ -270,15 +302,16 @@ class Trainer:
 
     @profile("config.profile")
     def data_collator(self, batch):
+        cls_targets = (batch["actors"].to(self.config.device), batch["theme"].to(self.config.device), batch["mechanism"].to(self.config.device))
         encoder_ids = self.encoder_tokenizer(
-            batch,
+            batch["text"],
             return_tensors="pt",
             padding=True,
             truncation=True,
             max_length=self.config.max_len,
         )
         decoder_ids = self.decoder_tokenizer(
-            batch,
+            batch["text"],
             return_tensors="pt",
             padding=True,
             truncation=True,
@@ -292,7 +325,7 @@ class Trainer:
             'enc_attention_mask': encoder_ids['attention_mask'].to(self.config.device),
             'dec_input_ids': self.apply_word_dropout(decoder_ids['input_ids'], self.config.word_dropout).to(self.config.device),
             'dec_attention_mask': decoder_ids['attention_mask'].to(self.config.device),
-        }, labels.to(self.config.device)
+        }, cls_targets, labels.to(self.config.device)
 
 
     @profile("config.profile")
@@ -308,21 +341,21 @@ class Trainer:
         torch.Tensor,
         torch.Tensor,
     ]:
-        data, labels = self.data_collator(batch)
-        with torch.nn.attention.sdpa_kernel(
-            [
-                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
-                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,
-            ],
-            set_priority=True,
-        ):
-            with autocast(device_type=self.config.device, dtype=torch.bfloat16, enabled=bool(self.config.fp16)):
+        data, cls_targets, labels = self.data_collator(batch)
+        with autocast(device_type=self.config.device, dtype=torch.bfloat16, enabled=bool(self.config.fp16)):
+            with torch.nn.attention.sdpa_kernel(
+                [
+                    torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                    torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                    torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                    torch.nn.attention.SDPBackend.MATH,
+                ],
+                set_priority=True,
+            ):
                 model_output = self.model(**data)
-                ce_loss, kl_loss, kl_loss_raw = self.loss(*(model_output[:-1]), labels)
+                ce_loss, kl_loss, kl_loss_raw, cls_loss = self.loss(*(model_output[:-1]), cls_targets, labels)
 
-        return model_output, ce_loss, kl_loss, kl_loss_raw, data
+        return model_output, ce_loss, kl_loss, kl_loss_raw, cls_loss, data, cls_targets
 
 
     @profile("config.profile")
@@ -336,8 +369,8 @@ class Trainer:
         torch.Tensor,
         torch.Tensor,
     ]:
-        model_output, ce_loss, kl_loss, kl_loss_raw, _ = self._forward_pass(batch)
-        sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss) / self.config.grad_accumulation_steps
+        model_output, ce_loss, kl_loss, kl_loss_raw, cls_loss, _, _ = self._forward_pass(batch)
+        sum_loss = (ce_loss + self.beta_scheduler.beta_curr * kl_loss + cls_loss) / self.config.grad_accumulation_steps
 
         sum_loss.backward()
 
@@ -363,7 +396,7 @@ class Trainer:
         )
         self._tb_log("beta", {"beta": self.beta_scheduler.beta_curr}, global_step=True)
         
-        return model_output, ce_loss, kl_loss_raw
+        return model_output, ce_loss, kl_loss_raw, cls_loss
 
 
     @profile("config.profile")
@@ -372,12 +405,20 @@ class Trainer:
         logits: torch.Tensor,
         batch_tokenized: torch.Tensor,
         target: torch.Tensor,
+        cls_inputs,
+        cls_targets,
         inference_ids: torch.Tensor | None = None,
     ) -> None:
         # aligned_logits = logits[:, :, :len(self.decoder_tokenizer)]
         self.perplexity.update(logits, batch_tokenized)
         # self.precision.update(aligned_logits.transpose(2, 1), batch_tokenized)
         # self.recall.update(aligned_logits.transpose(2, 1), batch_tokenized)
+        self.actors_precision.update(cls_inputs[0], cls_targets[0])
+        self.actors_recall.update(cls_inputs[0], cls_targets[0])
+        self.theme_precision.update(cls_inputs[1], cls_targets[1])
+        self.theme_recall.update(cls_inputs[1], cls_targets[1])
+        self.mechanism_precision.update(cls_inputs[2], cls_targets[2])
+        self.mechanism_recall.update(cls_inputs[2], cls_targets[2])
         if inference_ids is not None:
             decoded_pred_texts = self.decoder_tokenizer.batch_decode(inference_ids.tolist(), skip_special_tokens=True)
             self.word_error_rate.update(decoded_pred_texts, target)
@@ -393,6 +434,12 @@ class Trainer:
         output["wip"] = self.word_information_preserved.compute().item()
         # output["precision"] = self.precision.compute()
         # output["recall"] = self.recall.compute()
+        output["theme_precision"] = self.theme_precision.compute()
+        output["theme_recall"] = self.theme_recall.compute()
+        output["mechanism_precision"] = self.mechanism_precision.compute()
+        output["mechanism_recall"] = self.mechanism_recall.compute()
+        output["actors_precision"] = self.actors_precision.compute()
+        output["actors_recall"] = self.actors_recall.compute()
         return output
     
     def _reset_metrics(self) -> None:
@@ -401,6 +448,12 @@ class Trainer:
         self.word_information_preserved.reset()
         # self.precision.reset()
         # self.recall.reset()
+        self.theme_precision.reset()
+        self.theme_recall.reset()
+        self.mechanism_precision.reset()
+        self.mechanism_recall.reset()
+        self.actors_precision.reset()
+        self.actors_recall.reset()
 
 
     @profile("config.profile")
@@ -408,25 +461,27 @@ class Trainer:
         torch.Tensor, torch.Tensor, torch.Tensor,
     ]:
         with torch.inference_mode():
-            with torch.nn.attention.sdpa_kernel(
-                [
-                    torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                    torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
-                    torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-                    torch.nn.attention.SDPBackend.MATH,
-                ],
-                set_priority=True,
-            ):
-                model_output, ce_loss, _, kl_loss_raw, data = self._forward_pass(batch)
-            # do not wrap forward inference method into sdpa_kernel because of undocumented bug causing CUDA error
-            self._update_metrics(
-                logits=model_output[-2],
-                batch_tokenized=data["dec_input_ids"],
-                target=batch,
-                inference_ids=self.model.forward_inference(model_output[-1]) if do_generate else None,
-            )
+            with autocast(device_type=self.config.device, dtype=torch.bfloat16, enabled=bool(self.config.fp16)):
+                with torch.nn.attention.sdpa_kernel(
+                    [
+                        torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                        torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                        torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                        torch.nn.attention.SDPBackend.MATH,
+                    ],
+                    set_priority=True,
+                ):
+                    model_output, ce_loss, _, kl_loss_raw, cls_loss, data, cls_targets = self._forward_pass(batch)
+                    self._update_metrics(
+                        logits=model_output[-3],
+                        batch_tokenized=data["dec_input_ids"],
+                        target=batch,
+                        cls_inputs=model_output[-2],
+                        cls_targets=cls_targets,
+                        inference_ids=self.model.forward_inference(model_output[-1]) if do_generate else None,
+                    )
 
-        return model_output, ce_loss, kl_loss_raw
+        return model_output, ce_loss, kl_loss_raw, cls_loss
 
 
     def _training_epoch(
@@ -438,25 +493,28 @@ class Trainer:
 
         running_ce_loss = 0
         running_kl_loss = 0
+        running_cls_loss = 0
 
         for i, data in enumerate(self.trainloader):
-            _, ce_loss, kl_loss = self._training_step(data)
+            _, ce_loss, kl_loss, cls_loss = self._training_step(data)
 
             progress.update(
                 step_task,
                 advance=1,
-                info=f"Step: {i}/{self.train_epoch_len} beta={self.beta_scheduler.beta_curr:.5f} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Lr1={self.optimizer.param_groups[0]['lr']:.8f} Lr2={self.optimizer.param_groups[1]['lr']:.8f}"
+                info=f"Step: {i}/{self.train_epoch_len} beta={self.beta_scheduler.beta_curr:.5f} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} CLS={cls_loss.item():.4f} Lr1={self.optimizer.param_groups[0]['lr']:.8f} Lr2={self.optimizer.param_groups[1]['lr']:.8f}"
             )
 
             running_ce_loss += ce_loss.item()
             running_kl_loss += kl_loss.item()
+            running_cls_loss += cls_loss.item()
 
         running_ce_loss /= len(self.trainloader)
         running_kl_loss /= len(self.trainloader)
+        running_cls_loss /= len(self.trainloader)
 
-        self._tb_log("train", {"ce_loss": running_ce_loss, "kl_loss": running_kl_loss})
+        self._tb_log("train", {"ce_loss": running_ce_loss, "kl_loss": running_kl_loss, "cls_loss": running_cls_loss})
 
-        return running_ce_loss, running_kl_loss
+        return running_ce_loss, running_kl_loss, running_cls_loss
 
 
     def _validation_epoch(
@@ -476,12 +534,13 @@ class Trainer:
 
         running_ce_loss = 0
         running_kl_loss = 0
+        running_cls_loss = 0
         self.tsne = self.config.tsne
 
         mu_arr = []
         for i, data in enumerate(self.valloader):
             do_generate = (i % do_generate_interval == 0) and (self.config.val_generation_samples > 0)
-            model_output, ce_loss, kl_loss = self._validation_step(data, do_generate=do_generate)
+            model_output, ce_loss, kl_loss, cls_loss = self._validation_step(data, do_generate=do_generate)
 
             if self.config.tsne > 0 and self.tsne > 0:
                 mu_arr.append(model_output[0])
@@ -491,14 +550,16 @@ class Trainer:
             progress.update(
                 step_task,
                 advance=1,
-                info=f'Step: {i}/{self.val_epoch_len} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} Perplexity={metrics["perplexity"]:.4f} WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
+                info=f'Step: {i}/{self.val_epoch_len} CE={ce_loss.item():.4f} KL={kl_loss.item():.4f} CLS={cls_loss.item():.4f} Perplexity={metrics["perplexity"]:.4f} WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
             )
 
             running_ce_loss += ce_loss.item()
             running_kl_loss += kl_loss.item()
+            running_cls_loss += cls_loss.item()
 
         running_ce_loss /= len(self.valloader)
         running_kl_loss /= len(self.valloader)
+        running_cls_loss /= len(self.valloader)
 
         if self.config.tsne > 0:
             mu_arr_tensor = torch.cat(mu_arr, dim=0).detach().cpu()
@@ -515,7 +576,7 @@ class Trainer:
         self._tb_log("val", {"ce_loss": running_ce_loss, "kl_loss": running_kl_loss})
         self._tb_log("metrics", metrics)
 
-        return running_ce_loss, running_kl_loss, metrics, mu_arr
+        return running_ce_loss, running_kl_loss, running_cls_loss, metrics, mu_arr
 
 
     @profile("config.profile")
@@ -525,7 +586,8 @@ class Trainer:
         for i in range(self.config.inference_size):
             noise = torch.randn(1, self.config.latent_dim).to(self.config.device, dtype=self.model.decoder.dtype)
             with torch.inference_mode():
-                text = self.model.forward_inference(noise)
+                with autocast(device_type=self.config.device, dtype=torch.bfloat16, enabled=bool(self.config.fp16)):
+                    text = self.model.forward_inference(noise)
             decoded_text = self.decoder_tokenizer.decode(text[0], skip_special_tokens=True)
             texts.append(decoded_text)
 
@@ -602,21 +664,27 @@ class Trainer:
             self.writer = SummaryWriter(log_dir=("runs/" + self.config.name) if self.config.name else None)
 
         # Adding model graph
-        if not self.config.resume:
-            example_input = torch.zeros((1, 1), dtype=torch.long).to(self.config.device)
-            self.writer.add_graph(
-                torch.jit.trace(
-                    self.model,
-                    (
-                        example_input,
-                        example_input,
-                        example_input,
-                        example_input,
-                    ),
-                    strict=False),
-                [],
-            )
-            print(f"{current_time_str}. Model graph visualization added.")
+        # if not self.config.resume:
+        #     if self.config.fp16:
+        #         self.model.mapping_encoder.to(dtype=torch.bfloat16)
+        #         self.model.mapping_decoder.to(dtype=torch.bfloat16)
+        #     example_input = torch.zeros((1, 1), dtype=torch.long).to(self.config.device)
+        #     self.writer.add_graph(
+        #         torch.jit.trace(
+        #             self.model,
+        #             (
+        #                 example_input,
+        #                 example_input,
+        #                 example_input,
+        #                 example_input,
+        #             ),
+        #             strict=False),
+        #         [],
+        #     )
+        #     if self.config.fp16:
+        #         self.model.mapping_encoder.to(dtype=torch.float)
+        #         self.model.mapping_decoder.to(dtype=torch.float)
+        #     print(f"{current_time_str}. Model graph visualization added.")
 
         # self._compile_model()
         self._check_attn_backend()
@@ -657,22 +725,22 @@ class Trainer:
             for epoch in range(self.config.epochs):
                 progress.reset(train_step_task)
                 progress.reset(val_step_task, start=False)
-                # train_ce_loss, train_kl_loss = self._training_epoch(progress, train_step_task)
+                train_ce_loss, train_kl_loss, train_cls_loss = self._training_epoch(progress, train_step_task)
                 progress.start_task(val_step_task)
                 torch.cuda.empty_cache()
-                val_ce_loss, val_kl_loss, metrics, mu_arr = self._validation_epoch(progress, val_step_task)
+                val_ce_loss, val_kl_loss, val_cls_loss, metrics, mu_arr = self._validation_epoch(progress, val_step_task)
                 torch.cuda.empty_cache()
                 progress.update(
                     epoch_task,
                     advance=1,
-                    info=f'CE={val_ce_loss:.4f} KL={val_kl_loss:.4f} Perplexity={metrics["perplexity"]:.4f} \
+                    info=f'CE={val_ce_loss:.4f} KL={val_kl_loss:.4f} CLS={val_cls_loss.item():.4f} Perplexity={metrics["perplexity"]:.4f} \
 WER={metrics["wer"]:.4f} WIP={metrics["wip"]:.4f}'
                 )
                 self._inference()
                 current_time = datetime.now()
                 current_time_str = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-                # print(f"{current_time_str}. Epoch {self.current_epoch}\nTrain CE loss: {train_ce_loss:.4f}, Train KL loss: {train_kl_loss:.4f}")
-                print(f"Val CE loss: {val_ce_loss:.4f}, Val KL loss: {val_kl_loss:.4f}")
+                print(f"{current_time_str}. Epoch {self.current_epoch}\nTrain CE loss: {train_ce_loss:.4f}, Train KL loss: {train_kl_loss:.4f} Train CLS loss: {train_cls_loss:.4f}")
+                print(f"Val CE loss: {val_ce_loss:.4f}, Val KL loss: {val_kl_loss:.4f} Val CLS loss: {val_cls_loss:.4f}")
                 print(f'Perplexity: {metrics["perplexity"]:.3f}, WER: {metrics["wer"]:.3f}, WIP: {metrics["wip"]:.3f}')
                 mu_arr = torch.vstack(mu_arr).squeeze(dim=1)
                 print(f"Mu std: {mu_arr.std(dim=0).mean().item():.4f}, ||mu||: {mu_arr.norm(dim=-1).mean().item():.4f}")

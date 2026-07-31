@@ -1,4 +1,4 @@
-data_path: data/concatenated_anekdot_dataset_v2_1_2M.csv
+data_path: /mnt/e/datasets/funny_text_generator/parquet/concatenated_anekdot_dataset_v2_1_2M_w_annot.parquet
 train_batch_size: 16
 val_batch_size: 32
 train_size: 0.99
@@ -22,35 +22,33 @@ beta_max: 1
 beta_anneal_steps: 1 # in epochs
 lambda_: 0.2
 scheduler_type: linear
-word_dropout: 0.1
+word_dropout: 0.8
 workers: 5
 profile: True
-n_tokens: 8
+n_tokens: 1
 encoder_name: ai-forever/ruBert-base
 decoder_name: ai-forever/rugpt3large_based_on_gpt2
-name: exp_n_tokens_8_lambda_0.2_global_beta_max_1_word_dropout_0.1_ln_fc2_log_var_bias_-2_new_mapping_new_pretrained
+name: n_tokens_1_wd_0.8_lora_c_attn_c_proj_c_fc_minimal_mapping_cls_heads
 lora: True
 lora_modules:
   - c_attn
+  - c_proj
+  - c_fc
+num_themes: 226
+num_actors: 200
+num_mechanisms: 56
 
 # resume: outputs/models/TransformerAnekdotGenerator_last.pt
 
 # @TODO: REFACTOR ALL!!!
 
+# Packing (батч превращаем в сполшной текст с <EOS> между ними)
+# mean в KL loss и подобрать beta для масштаба
+# meta-llama/Llama-3.2-1B FA-2
+# qwen 2.5 1.5B FA-2
+# deepvk/RuModernBERT-base
+# loss на attention между Q и K для токенов z
 
-# word dropout с заменой случайных wte на нулевые вектора
-# attention dropout
-# z = z + eps, eps ~ N(0, s**2) и плавно уменьшать s до 0
 # несколько шагов энкодер + маппинг перед обучением декодера
-# VAMPPrior
-# VAE-GAN
-
-# LN после act и до mu, log_var
 # log_var_layer.weight ~= 1e-4, bias=0
-# global free-bits
-# не один большой слой разжатия z, а 2 или больше, чтобы не резко взрывалось количество выходов
-# bert-base + gpt3-large
 # заморозка энкодера кроме последних 2 слоев
-# Другой декодер на +- 1B параметров
-
-# Перенести датасет в parquet, все на ssd nvme
