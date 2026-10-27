@@ -6,11 +6,12 @@ class TextDataset:
         self,
         df: pd.DataFrame,
     ):
-        self.df = df
+        self._df = df
 
-    def __getitem__(self, idx):
-        return self.df["Text"].iloc[idx]
+
+    def __getitem__(self, idx: int):
+        return self._df["Text"].iloc[idx]
 
 
     def __len__(self):
-        return len(self.df)
+        return len(self._df)

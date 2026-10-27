@@ -32,6 +32,9 @@ name: exp_n_tokens_8_lambda_0.2_global_beta_max_1_word_dropout_0.1_ln_fc2_log_va
 lora: True
 lora_modules:
   - c_attn
+top_p: 0.9
+top_k: 50
+temperature: 0.8
 
 # resume: outputs/models/TransformerAnekdotGenerator_last.pt
 
