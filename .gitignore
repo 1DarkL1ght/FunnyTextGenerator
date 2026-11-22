@@ -4,6 +4,7 @@ session_name.session
 /data
 .env
 **/__pycache__
+*.egg-info/
 tokenize
 *.ipynb
 *.pth

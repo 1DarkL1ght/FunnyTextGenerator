@@ -1,3 +1,0 @@
-from src.funny_text_generator.beta_scheduler.base import BetaScheduler
-from src.funny_text_generator.beta_scheduler.linear import LinearBetaScheduler
-from src.funny_text_generator.beta_scheduler.cyclic import CyclicBetaScheduler

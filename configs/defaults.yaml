@@ -1,3 +1,4 @@
+model_type: pretrained
 data_path: data/concatenated_anekdot_dataset.csv
 train_batch_size: 32
 val_batch_size: 64
@@ -41,6 +42,9 @@ scheduler_type: linear
 workers: 3
 profile: False
 n_tokens: 1
+top_p: 0.9
+top_k: 50
+temperature: 0.8
 lora: False
 lora_modules:
  - "c_attn"
